@@ -40,7 +40,7 @@ android {
 
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".debug"
+            // Retain standard package name dev.trooped.tvquickbars for direct deployment
         }
         getByName("release") {
             isMinifyEnabled = true
