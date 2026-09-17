@@ -11,6 +11,7 @@ import dev.trooped.tvquickbars.data.CategoryItem
 import dev.trooped.tvquickbars.data.EntityItem
 import dev.trooped.tvquickbars.ha.ws.HaClientBridge
 import dev.trooped.tvquickbars.ha.ws.MessageRouter
+import dev.trooped.tvquickbars.ha.ws.handlers.QuickBarsCloseHandler
 import dev.trooped.tvquickbars.ha.ws.handlers.QuickBarsNotifyHandler
 import dev.trooped.tvquickbars.ha.ws.handlers.QuickBarsOpenHandler
 import dev.trooped.tvquickbars.ha.ws.handlers.StateChangedHandler
@@ -93,6 +94,7 @@ class HomeAssistantClient(
                 StateChangedHandler(),
                 QuickBarsOpenHandler(),
                 QuickBarsNotifyHandler(),
+                QuickBarsCloseHandler(),
             )
         )
     }

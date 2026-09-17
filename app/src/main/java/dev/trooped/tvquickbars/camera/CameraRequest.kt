@@ -15,5 +15,12 @@ data class CameraRequest(
     val showToggleToast: Boolean? = null,  // default true when not provided
     val rtspTransport: String? = null, // "tcp", "udp", "auto"
     val rtspLatency: String? = null,   // "low", "balanced", "high"
-    val useSoftwareDecoder: Boolean? = null
+    val useSoftwareDecoder: Boolean? = null,
+
+    // ── Multi-camera & Enhanced Lifecycle Extensions ──
+    val action: String? = null,            // "open" | "close" | "close_all" | "toggle"
+    val slot: String? = null,              // explicit slot key or corner override
+    val layout: String? = null,            // "grid" | "side_by_side" | "stacked"
+    val cameras: List<CameraRequest>? = null, // for multi-camera combined group requests
+    val allowMultiple: Boolean? = true     // if true, does not clobber active cameras in other slots
 )

@@ -1744,10 +1744,14 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
     }
 
     @MainThread
-    private fun hideCameraPip() {
-        camera.hide()
+    fun hideCameraPip(target: String? = null) {
+        camera.hide(target)
     }
 
+    @MainThread
+    fun hideAllCameraPips() {
+        camera.hideAll()
+    }
 
     fun handleCameraRequest(req: CameraRequest) {
         camera.handleRequest(req)
