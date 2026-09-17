@@ -42,7 +42,12 @@ class UpgradeActivity : BaseActivity() {
         priceText.text = "Loading..."
         purchaseButton.isEnabled = false
 
-        // Fetch the product using the same callback style as your donation code
+        if (!Purchases.isConfigured) {
+            priceText.text = "Plus Status Unlocked"
+            purchaseButton.isEnabled = false
+            return
+        }
+
         val productIds = listOf("plus_unlock")
         Purchases.sharedInstance.getProducts(
             productIds,

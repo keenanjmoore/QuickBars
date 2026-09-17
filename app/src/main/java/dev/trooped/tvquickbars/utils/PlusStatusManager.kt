@@ -20,11 +20,11 @@ import androidx.core.content.edit
  * This object determines the plus status of an object during runtime.
  */
 object PlusStatusManager {
-    private val _isPlus = MutableStateFlow(false)
+    private val _isPlus = MutableStateFlow(true)
     val isPlus = _isPlus.asStateFlow()
 
     fun update(info: CustomerInfo) {
-        _isPlus.value = info.entitlements["plus"]?.isActive == true
+        _isPlus.value = info.entitlements["plus"]?.isActive ?: true
         Log.d("PlusStatus", "Entitlement refresh → isPlus=${_isPlus.value}")
     }
 }
