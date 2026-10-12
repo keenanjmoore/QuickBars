@@ -12,7 +12,7 @@ data class CameraRequest(
     val rtspUrl:  String? = null,          // for RTSP stream
     val customTitle: String? = null,       // overrides title if provided/non-blank
     val muteAudio: Boolean? = null,        // RTSP only; true = mute player
-    val showToggleToast: Boolean = true,  // default true when not provided
+    val showToggleToast: Boolean? = null,  // null = fallback to app setting, true/false = explicit override
     val rtspTransport: String? = null, // "tcp", "udp", "auto"
     val rtspLatency: String? = null,   // "low", "balanced", "high"
     val useSoftwareDecoder: Boolean? = null,
