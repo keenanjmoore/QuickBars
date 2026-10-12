@@ -18,6 +18,12 @@ android {
     }
 
     signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         create("release") {
             // Read properties for the keystore file location and passwords
             val keystorePath = findProperty("HA_QUICKBARS_KEYSTORE_FILE") as String?
