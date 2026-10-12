@@ -13,7 +13,7 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
 
     override fun canHandle(event: JSONObject): Boolean {
         val eventType = event.optString("event_type")
-        return eventType == "quickbars.open" || eventType == "quickbars.close"
+        return eventType == "quickbars.open"
     }
 
     @OptIn(UnstableApi::class)
@@ -37,18 +37,6 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
                 Log.d("HAClient", "$eventType ignored (targetId=$targetId, myId=$myId)")
                 return
             }
-        }
-
-        // Explicit quickbars.close event support
-        if (eventType == "quickbars.close") {
-            val closeAll = data.optBoolean("close_all", false)
-            if (closeAll || (!data.has("camera_entity") && !data.has("camera_alias") && !data.has("slot"))) {
-                ctx.listener.onCameraRequest(CameraRequest(action = "close_all"))
-            } else {
-                val req = parseCameraRequest(data).copy(action = "close")
-                ctx.listener.onCameraRequest(req)
-            }
-            return
         }
 
         // Action specified in quickbars.open

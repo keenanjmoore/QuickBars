@@ -12,7 +12,7 @@ data class CameraRequest(
     val rtspUrl:  String? = null,          // for RTSP stream
     val customTitle: String? = null,       // overrides title if provided/non-blank
     val muteAudio: Boolean? = null,        // RTSP only; true = mute player
-    val showToggleToast: Boolean? = null,  // default true when not provided
+    val showToggleToast: Boolean = true,  // default true when not provided
     val rtspTransport: String? = null, // "tcp", "udp", "auto"
     val rtspLatency: String? = null,   // "low", "balanced", "high"
     val useSoftwareDecoder: Boolean? = null,
@@ -22,5 +22,11 @@ data class CameraRequest(
     val slot: String? = null,              // explicit slot key or corner override
     val layout: String? = null,            // "grid" | "side_by_side" | "stacked"
     val cameras: List<CameraRequest>? = null, // for multi-camera combined group requests
-    val allowMultiple: Boolean? = true     // if true, does not clobber active cameras in other slots
-)
+    val allowMultiple: Boolean = true     // if true, does not clobber active cameras in other slots
+) {
+    init {
+        require(sizePxW == null || sizePxW > 0) { "sizePxW must be positive" }
+        require(sizePxH == null || sizePxH > 0) { "sizePxH must be positive" }
+        require(autoHideSec == null || autoHideSec >= 0) { "autoHideSec must be >= 0" }
+    }
+}

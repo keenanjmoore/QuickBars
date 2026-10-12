@@ -229,7 +229,10 @@ class CameraPipController(
 
     @MainThread
     fun show(spec: CameraPipSpec): Unit = runOnMain {
-        if (!Settings.canDrawOverlays(context)) return@runOnMain
+        if (!Settings.canDrawOverlays(context)) {
+            showToast("Overlay permission required")
+            return@runOnMain
+        }
 
         val slotKey = spec.slotKey
 
@@ -406,17 +409,16 @@ class CameraPipController(
         try { owner.pause() } catch (_: Throwable) {}
         try { view.setContent { } } catch (_: Throwable) {}
 
-        view.post {
-            try {
-                if (view.isAttachedToWindow) {
-                    windowManager.removeViewImmediate(view)
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "removeViewImmediate failed for $slotKey, fallback to removeView", t)
-                try { windowManager.removeView(view) } catch (_: Throwable) {}
+        // Synchronous removal: closes the race window between map eviction and WindowManager detachment
+        try {
+            if (view.isAttachedToWindow) {
+                windowManager.removeViewImmediate(view)
             }
-            try { owner.destroy() } catch (_: Throwable) {}
+        } catch (t: Throwable) {
+            Log.w(TAG, "removeViewImmediate failed for $slotKey, fallback to removeView", t)
+            try { windowManager.removeView(view) } catch (_: Throwable) {}
         }
+        try { owner.destroy() } catch (_: Throwable) {}
     }
 
     @MainThread
