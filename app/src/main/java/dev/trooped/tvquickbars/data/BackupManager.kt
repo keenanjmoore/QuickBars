@@ -268,6 +268,7 @@ class BackupManager(private val context: Context) {
                     }
                 }
                 savedEntitiesManager.saveEntities(normalized)
+                SavedEntitiesManager.invalidateCache()
             }
             if (restoreQuickBars && backupData.quickBars != null) {
                 quickBarManager.saveQuickBars(backupData.quickBars)

@@ -32,9 +32,43 @@ object HAStateStore {
     private val _activePipIds = MutableStateFlow<List<String>>(emptyList())
     val activePipIds: StateFlow<List<String>> = _activePipIds
 
+    private val pipIdsByHost = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
+
+    private val _foregroundApp = MutableStateFlow<String?>(null)
+    val foregroundApp: StateFlow<String?> = _foregroundApp
+
+    private val FULLSCREEN_MEDIA_PACKAGES = setOf(
+        "com.plexapp.android",
+        "com.netflix.ninja",
+        "com.google.android.youtube.tv",
+        "com.amazon.amazonvideo.livingroom",
+        "com.disney.disneyplus",
+        "com.hbo.hbonow",
+        "com.wbd.stream",
+        "com.apple.atve.androidtv.appletv",
+        "org.xbmc.kodi",
+        "tv.twitch.android.app",
+        "com.emby.embytv",
+        "org.jellyfin.androidtv",
+        "com.peacocktv.peacockandroid",
+        "com.cbs.app"
+    )
+
     fun setConnection(state: ConnectionState) { _connection.value = state }
 
-    fun setActivePipIds(ids: List<String>) { _activePipIds.value = ids }
+    fun setForegroundApp(pkg: String?) {
+        if (!pkg.isNullOrBlank()) {
+            _foregroundApp.value = pkg
+        }
+    }
+
+    fun isFullscreenMediaApp(): Boolean =
+        _foregroundApp.value in FULLSCREEN_MEDIA_PACKAGES
+
+    fun setActivePipIds(ids: List<String>, hostKey: String = "service") {
+        pipIdsByHost[hostKey] = ids
+        _activePipIds.value = pipIdsByHost.values.flatten().distinct()
+    }
 
     fun setCategories(list: List<CategoryItem>) {
         _categories.value = list

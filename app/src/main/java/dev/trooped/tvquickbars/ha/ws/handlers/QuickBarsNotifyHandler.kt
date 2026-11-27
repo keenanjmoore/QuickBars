@@ -26,12 +26,18 @@ class QuickBarsNotifyHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             return
         }
 
-        val bypassDnd = data.optBoolean("force", false) ||
+        val prio = data.optString("priority", "normal").lowercase()
+        val bypassAll = data.optBoolean("force", false) ||
             data.optBoolean("bypass_dnd", false) ||
-            data.optString("priority", "").equals("critical", ignoreCase = true)
+            prio == "critical"
+        val bypassQuietHours = bypassAll || prio == "high"
 
-        if (!bypassDnd && (AppPrefs.isDndEnabled(context) || AppPrefs.isCurrentlyInQuietHours(context))) {
-            Log.i(TAG, "Notification suppressed by DND / Quiet Hours")
+        if (!bypassAll && AppPrefs.isDndEnabled(context)) {
+            Log.i(TAG, "Notification suppressed by Cinema DND")
+            return
+        }
+        if (!bypassQuietHours && AppPrefs.isCurrentlyInQuietHours(context)) {
+            Log.i(TAG, "Notification suppressed by Quiet Hours")
             return
         }
 

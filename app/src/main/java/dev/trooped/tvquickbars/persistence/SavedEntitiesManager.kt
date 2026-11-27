@@ -353,7 +353,13 @@ class SavedEntitiesManager(val context: Context) {
     fun loadEntities(): MutableList<EntityItem> {
         synchronized(cacheLock) {
             cachedEntities?.let { cached ->
-                return cached.mapTo(mutableListOf()) { it }
+                return cached.mapTo(mutableListOf()) {
+                    it.copy(
+                        lastKnownState = it.lastKnownState.toMutableMap(),
+                        pressActions = it.pressActions.toMutableMap(),
+                        pressTargets = it.pressTargets.toMutableMap()
+                    )
+                }
             }
         }
 

@@ -1807,6 +1807,11 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         camera.hideAll()
     }
 
+    @MainThread
+    fun hideAutoCloseCameraPips() {
+        if (::camera.isInitialized) camera.hideAutoCloseOverlays()
+    }
+
     fun handleCameraRequest(req: CameraRequest) {
         camera.handleRequest(req)
     }
@@ -1918,6 +1923,13 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         return super.onUnbind(intent)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val pkg = event.packageName?.toString() ?: return
+            if (pkg != packageName && pkg != "com.android.systemui" && pkg != "android") {
+                HAStateStore.setForegroundApp(pkg)
+            }
+        }
+    }
     override fun onInterrupt() {}
 }

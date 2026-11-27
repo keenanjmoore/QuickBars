@@ -191,6 +191,9 @@ class HomeAssistantClient(
     fun disconnect() {
         val ws = webSocket
         webSocket = null
+        if (_connectionState.value !is ConnectionState.Error) {
+            _connectionState.value = ConnectionState.Disconnected
+        }
         try {
             ws?.close(1000, "Client Disconnecting")
         } catch (_: Throwable) {}
@@ -713,32 +716,45 @@ class HomeAssistantClient(
      * @param allEntities The raw entity data from Home Assistant.
      */
     private fun processEntityData(allEntities: org.json.JSONArray) {
-        val entityItemsByDomain = mutableMapOf<String, MutableList<EntityItem>>()
+        val context = getContext()
+        val savedIds = if (useEntitySubscription && context != null) {
+            SavedEntitiesManager(context).loadEntities().map { it.id }.toSet()
+        } else {
+            emptySet()
+        }
 
+        val entityItemsByDomain = mutableMapOf<String, MutableList<EntityItem>>()
         knownIds.clear()
 
-        // Loop through raw data and create EntityItem objects
         for (i in 0 until allEntities.length()) {
             val entity = allEntities.getJSONObject(i)
             val entityId = entity.getString("entity_id")
-            val domain = entityId.split('.').first()
-            val attributes = entity.getJSONObject("attributes")
-            val friendlyName = attributes.optString("friendly_name", entityId)
-            val state = entity.getString("state")
-
             knownIds += entityId
+
+            // In background subscription mode, skip allocating/sorting thousands of unused entities
+            if (useEntitySubscription && savedIds.isNotEmpty() &&
+                entityId !in savedIds &&
+                !entityId.startsWith("camera.") &&
+                !entityId.startsWith("input_boolean.quickbars_")
+            ) {
+                continue
+            }
+
+            val domain = entityId.substringBefore('.')
+            val attributes = entity.optJSONObject("attributes") ?: JSONObject()
+            val friendlyName = attributes.optString("friendly_name", entityId)
+            val state = entity.optString("state", "unknown")
 
             val entityItem = EntityItem(
                 id = entityId,
                 friendlyName = friendlyName,
                 state = state,
-                attributes = attributes, // Store the full attributes object
+                attributes = attributes,
                 isSelected = false
             )
             entityItemsByDomain.getOrPut(domain) { mutableListOf() }.add(entityItem)
         }
 
-        // Convert the grouped data into the final List<CategoryItem>
         val categoryList = entityItemsByDomain.map { (domain, entities) ->
             CategoryItem(
                 name = domain.uppercase(),
@@ -746,18 +762,15 @@ class HomeAssistantClient(
             )
         }.sortedBy { it.name }
 
-        val context = getContext()
         if (context != null) {
             reconcileSavedEntities(SavedEntitiesManager(context))
         } else {
             Log.w(TAG, "Context is null, skipping reconcileSavedEntities")
-            // We still want to update the global state store even if we can't reconcile
         }
 
-        // Use the listener to send the final, structured list back to the MainActivity
         listener.onEntitiesFetched(categoryList)
-        HAStateStore.setCategories(categoryList) // Ensure state store is updated
-        Log.d(TAG, "entitiesFetched categories=${categoryList.size} totalEntities=${categoryList.sumOf { it.entities.size }}")
+        HAStateStore.setCategories(categoryList)
+        Log.d(TAG, "entitiesFetched categories=${categoryList.size} trackedEntities=${categoryList.sumOf { it.entities.size }} totalKnown=${knownIds.size}")
     }
 }
 

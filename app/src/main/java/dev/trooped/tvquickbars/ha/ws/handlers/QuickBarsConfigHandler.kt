@@ -89,7 +89,7 @@ class QuickBarsConfigHandler : WsHandler {
 
         if (changed) {
             Log.i(TAG, "Applied remote config update from HA: $data")
+            BackgroundHaConnectionManager.publishTelemetryNow(context, trigger = "config")
         }
-        BackgroundHaConnectionManager.publishTelemetryNow(context, trigger = "config")
     }
 }

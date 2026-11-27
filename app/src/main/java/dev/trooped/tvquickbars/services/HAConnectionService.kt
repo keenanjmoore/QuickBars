@@ -3,12 +3,16 @@ package dev.trooped.tvquickbars.services
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import dev.trooped.tvquickbars.R
 import dev.trooped.tvquickbars.background.BackgroundHaConnectionManager
@@ -63,10 +67,31 @@ class HAConnectionService : LifecycleService() {
         }
     }
 
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF, Intent.ACTION_DREAMING_STARTED -> {
+                    BackgroundHaConnectionManager.onScreenStateChanged(applicationContext, isScreenOff = true)
+                }
+                Intent.ACTION_SCREEN_ON, Intent.ACTION_DREAMING_STOPPED -> {
+                    BackgroundHaConnectionManager.onScreenStateChanged(applicationContext, isScreenOff = false)
+                }
+            }
+        }
+    }
+
     @RequiresApi(Build.VERSION_CODES.Q)
     override fun onCreate() {
         super.onCreate()
         makeChannel()
+
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_DREAMING_STARTED)
+            addAction(Intent.ACTION_DREAMING_STOPPED)
+        }
+        ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
 
 
         val n = buildNotification("Connecting…")
@@ -102,6 +127,7 @@ class HAConnectionService : LifecycleService() {
         Log.d("HAConnection", "Service being destroyed, shutting down background connection")
 
         serviceMonitorJob.cancel()
+        try { unregisterReceiver(screenReceiver) } catch (_: Throwable) {}
 
         super.onDestroy()
         BackgroundHaConnectionManager.stop()

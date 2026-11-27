@@ -349,6 +349,7 @@ class EntityImporterViewModel(
                 )
                 savedEntities.add(newEntity)
                 savedEntitiesManager.saveEntity(newEntity)
+                SavedEntitiesManager.invalidateCache()
             }
         } else {
             /*──────── 2-b  removal path (with QuickBar / Trigger-key safety) ─────────*/

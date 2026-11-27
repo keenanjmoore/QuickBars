@@ -16,11 +16,15 @@ class QuickBarsCloseHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
         val context = ctx.getContext() ?: return
         val data = event.optJSONObject("data") ?: JSONObject()
 
+        val closeAll = data.optBoolean("close_all", false)
+        // Fail-closed if caller supplied an explicit blank 'id' without close_all
+        if (!closeAll && data.has("id") && data.optString("id", "").isBlank()) {
+            Log.w("HAClient", "quickbars.close rejected: blank 'id' without close_all")
+            return
+        }
         if (!TargetMatcher.matches(context, data)) {
             return
         }
-
-        val closeAll = data.optBoolean("close_all", false)
         val entity = data.optString("camera_entity", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
         val alias = data.optString("camera_alias", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
         val slot = data.optString("slot", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }

@@ -204,8 +204,10 @@ fun SingleCameraFeedView(spec: CameraPipSpec) {
         if (isExoStream) {
             CameraRtspView(
                 url = spec.url,
-                modifier = Modifier.fillMaxSize(),
-                config = spec.rtspProfile
+                config = spec.rtspProfile,
+                snapshotUrl = spec.snapshotUrl,
+                authToken = spec.authToken,
+                modifier = Modifier.fillMaxSize()
             )
         } else {
             CameraMjpegView(
@@ -306,6 +308,8 @@ data class RtspProfile(
 private fun CameraRtspView(
     url: String,
     config: RtspProfile,
+    snapshotUrl: String? = null,
+    authToken: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -315,6 +319,29 @@ private fun CameraRtspView(
     var retryCount by remember(url, config) { mutableStateOf(0) }
     var isFirstFrameRendered by remember(url, config) { mutableStateOf(false) }
     var pendingRetry by remember(url, config) { mutableStateOf(false) }
+    var snapshotBmp by remember(snapshotUrl) { mutableStateOf<Bitmap?>(null) }
+
+    // Option A6: Snapshot-first PiP (show instant JPEG frame while RTSP negotiates)
+    LaunchedEffect(snapshotUrl, authToken) {
+        if (snapshotUrl.isNullOrBlank()) return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            try {
+                val reqBuilder = Request.Builder().url(snapshotUrl)
+                if (!authToken.isNullOrBlank()) {
+                    reqBuilder.header("Authorization", "Bearer $authToken")
+                }
+                SharedHttpClients.mediaFetch.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bytes = resp.body?.bytes()
+                        if (bytes != null && bytes.isNotEmpty()) {
+                            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+                            snapshotBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+    }
 
     LaunchedEffect(pendingRetry, retryCount) {
         if (pendingRetry && retryCount in 1..5) {
@@ -400,6 +427,7 @@ private fun CameraRtspView(
                     addListener(object : androidx.media3.common.Player.Listener {
                         override fun onRenderedFirstFrame() {
                             isFirstFrameRendered = true
+                            retryCount = 0
                             showDebug = false
                             lastError = null
                         }
@@ -435,6 +463,15 @@ private fun CameraRtspView(
                 surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
                 modifier = Modifier.fillMaxSize()
             )
+
+            if (!isFirstFrameRendered && snapshotBmp != null && !showDebug) {
+                Image(
+                    bitmap = snapshotBmp!!.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+            }
 
             if (isFirstFrameRendered && !showDebug) {
                 Row(
@@ -571,6 +608,8 @@ fun CameraMjpegView(
     LaunchedEffect(url, authToken) {
         error = null
         isLoading = true
+        var attempt = 0
+        var reusableBmp: Bitmap? = null
 
         val reqBuilder = Request.Builder().url(url)
         if (!authToken.isNullOrBlank()) {
@@ -578,46 +617,40 @@ fun CameraMjpegView(
         }
         val req = reqBuilder.build()
 
-        try {
-            withContext(Dispatchers.IO) {
-                try {
+        while (isActive) {
+            try {
+                withContext(Dispatchers.IO) {
                     okHttp.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) {
-                            val errorMsg = "HTTP ${resp.code}: ${resp.message}"
-                            Log.e(tag, errorMsg)
-                            error = errorMsg
-                            isLoading = false
-                            return@withContext
+                            throw IllegalStateException("HTTP ${resp.code}: ${resp.message}")
                         }
-
-                        val stream = resp.body?.byteStream()
-                        if (stream == null) {
-                            error = "Empty body"
-                            isLoading = false
-                            return@withContext
-                        }
+                        val stream = resp.body?.byteStream() ?: throw IllegalStateException("Empty body")
+                        attempt = 0
 
                         BufferedInputStream(stream, 64 * 1024).use { bis ->
                             readMjpegLoop(bis) { frameBytes ->
-                                val bmp = BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
-                                if (bmp != null) {
-                                    bitmap = bmp
+                                val decoded = decodeMjpegFrame(frameBytes, reusableBmp)
+                                if (decoded != null) {
+                                    reusableBmp = decoded
+                                    bitmap = decoded
+                                    error = null
                                     if (isLoading) isLoading = false
-                                } else {
-                                    Log.e(tag, "Failed to decode bitmap from frame")
                                 }
                             }
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e(tag, "Error in MJPEG request", e)
-                    throw e
                 }
+            } catch (t: Throwable) {
+                if (!isActive) break
+                attempt += 1
+                Log.w(tag, "MJPEG stream dropped (attempt $attempt): ${t.message}")
+                if (attempt > 5) {
+                    error = t.message ?: "Stream error"
+                    isLoading = false
+                    break
+                }
+                delay((1000L shl minOf(attempt - 1, 3)).coerceAtMost(8000L))
             }
-        } catch (t: Throwable) {
-            Log.e(tag, "MJPEG failed", t)
-            error = t.message ?: "Unknown error"
-            isLoading = false
         }
     }
 
@@ -643,10 +676,31 @@ fun CameraMjpegView(
     }
 }
 
+private fun decodeMjpegFrame(frameBytes: ByteArray, reusable: Bitmap?): Bitmap? {
+    val opts = BitmapFactory.Options().apply {
+        inMutable = true
+        inSampleSize = if (frameBytes.size > 350 * 1024) 2 else 1
+        if (reusable != null && !reusable.isRecycled) {
+            inBitmap = reusable
+        }
+    }
+    return try {
+        BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size, opts)
+    } catch (_: IllegalArgumentException) {
+        // Dimensions or sample size changed: decode cleanly without inBitmap
+        val fallbackOpts = BitmapFactory.Options().apply {
+            inMutable = true
+            inSampleSize = opts.inSampleSize
+        }
+        BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size, fallbackOpts)
+    }
+}
+
 /**
- * Reusable dynamic frame buffer avoiding continuous allocations on TV garbage collectors.
+ * Reusable dynamic frame buffer with 4 MB safety cap avoiding OOM on corrupted streams.
  */
 private class FastFrameBuffer(initialCapacity: Int = 256 * 1024) {
+    private val maxCapacity = 4 * 1024 * 1024
     var buf = ByteArray(initialCapacity)
     var size = 0
         private set
@@ -656,6 +710,11 @@ private class FastFrameBuffer(initialCapacity: Int = 256 * 1024) {
     }
 
     fun write(source: ByteArray, offset: Int, length: Int) {
+        if (size + length > maxCapacity) {
+            Log.w("CameraMjpegView", "MJPEG frame buffer exceeded 4MB cap; resetting to resync")
+            size = 0
+            if (length > maxCapacity) return
+        }
         ensureCapacity(size + length)
         System.arraycopy(source, offset, buf, size, length)
         size += length

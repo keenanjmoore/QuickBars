@@ -42,7 +42,8 @@ data class CameraPipSpec(
     val isGroup: Boolean = false,
     val groupSpecs: List<CameraPipSpec> = emptyList(),
     val groupLayout: String = "grid",
-    val autoCloseOnSleep: Boolean = true
+    val autoCloseOnSleep: Boolean = true,
+    val snapshotUrl: String? = null
 ) : Parcelable {
     constructor(parcel: Parcel) : this(
         url = parcel.readString() ?: "",
@@ -62,7 +63,8 @@ data class CameraPipSpec(
             parcel.readTypedList(this, CREATOR)
         },
         groupLayout = parcel.readString() ?: "grid",
-        autoCloseOnSleep = parcel.readInt() != 0
+        autoCloseOnSleep = parcel.readInt() != 0,
+        snapshotUrl = parcel.readString()
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -83,6 +85,7 @@ data class CameraPipSpec(
         parcel.writeTypedList(groupSpecs)
         parcel.writeString(groupLayout)
         parcel.writeInt(if (autoCloseOnSleep) 1 else 0)
+        parcel.writeString(snapshotUrl)
     }
 
     override fun describeContents(): Int = 0

@@ -73,6 +73,8 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
 
     private val updateThrottleMap = ConcurrentHashMap<String, Long>()
     private val UPDATE_THROTTLE_MS = 250L // Min time between updates for same entity
+    private val lastDiskSaveMap = ConcurrentHashMap<String, Long>()
+    private val DISK_SAVE_DEBOUNCE_MS = 5000L
 
     private var lastSuccessfulConnectionTime = 0L
 
@@ -294,6 +296,7 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             put("active_pip_count", activePips.size)
             put("active_cameras", activeArr)
             put("a11y_bound", QuickBarService.serviceInstance != null)
+            put("foreground_app", HAStateStore.foregroundApp.value ?: "")
             put("uptime_sec", SystemClock.elapsedRealtime() / 1000L)
         }
         c.fireEvent("quickbars.telemetry", payload)
@@ -379,6 +382,16 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
         } ?: Log.w("BgHaConn", "Service not running; camera alias ignored: $cameraAlias")
     }
 
+    fun onScreenStateChanged(ctx: Context, isScreenOff: Boolean) {
+        if (isScreenOff) {
+            mainHandler.post {
+                QuickBarService.serviceInstance?.hideAutoCloseCameraPips()
+                fallbackCamera?.hideAutoCloseOverlays()
+            }
+        }
+        publishTelemetryNow(ctx, trigger = if (isScreenOff) "screen_off" else "screen_on")
+    }
+
     @MainThread
     private fun getOrCreateFallbackCamera(ctx: Context): CameraPipController {
         fallbackCamera?.let { return it }
@@ -388,7 +401,8 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             context = appCtx,
             windowManager = wm,
             runOnMain = { r -> if (Looper.myLooper() == Looper.getMainLooper()) r() else mainHandler.post(r) },
-            showToast = { msg -> Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show() }
+            showToast = { msg -> Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show() },
+            hostKey = "fallback"
         ).also { fallbackCamera = it }
     }
 
@@ -489,9 +503,14 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                         entity.isSaved = true
                     }
 
-                    // Re-save if entity was saved
+                    // Debounce disk writes to at most once every 5s per entity
                     if (entity.isSaved) {
-                        savedEntitiesManager.saveEntity(entity)
+                        val now = System.currentTimeMillis()
+                        val prev = lastDiskSaveMap[entity.id] ?: 0L
+                        if (now - prev >= DISK_SAVE_DEBOUNCE_MS) {
+                            lastDiskSaveMap[entity.id] = now
+                            savedEntitiesManager.saveEntity(entity)
+                        }
                     }
                 }
             }
@@ -516,9 +535,14 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                         entity.isSaved = true
                     }
 
-                    // Re-save if entity was saved
+                    // Debounce disk writes to at most once every 5s per entity
                     if (entity.isSaved) {
-                        savedEntitiesManager.saveEntity(entity)
+                        val now = System.currentTimeMillis()
+                        val prev = lastDiskSaveMap[entity.id] ?: 0L
+                        if (now - prev >= DISK_SAVE_DEBOUNCE_MS) {
+                            lastDiskSaveMap[entity.id] = now
+                            savedEntitiesManager.saveEntity(entity)
+                        }
                     }
                 }
             }

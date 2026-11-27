@@ -176,7 +176,7 @@ object AppPrefs {
     }
 
     fun getTelemetryIntervalSec(ctx: Context): Int =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_TELEMETRY_INTERVAL_SEC, 60).coerceIn(15, 3600)
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_TELEMETRY_INTERVAL_SEC, 300).coerceIn(15, 3600)
 
     fun setTelemetryIntervalSec(ctx: Context, seconds: Int) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {

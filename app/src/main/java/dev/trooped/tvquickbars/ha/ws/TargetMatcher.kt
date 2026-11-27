@@ -77,7 +77,7 @@ object TargetMatcher {
 
     private fun extractTargets(payload: JSONObject): List<String> {
         val list = ArrayList<String>()
-        for (key in listOf("target_id", "target", "id_target")) {
+        for (key in listOf("id", "target_id", "target", "id_target")) {
             if (payload.has(key) && !payload.isNull(key)) {
                 val obj = payload.opt(key)
                 when (obj) {

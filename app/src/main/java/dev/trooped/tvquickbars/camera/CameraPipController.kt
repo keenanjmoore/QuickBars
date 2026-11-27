@@ -45,7 +45,8 @@ class CameraPipController(
     private val context: Context,
     private val windowManager: WindowManager,
     private val runOnMain: (block: () -> Unit) -> Unit,
-    private val showToast: (String) -> Unit
+    private val showToast: (String) -> Unit,
+    private val hostKey: String = "service"
 ) {
     private val TAG = "CameraPipController"
 
@@ -100,20 +101,35 @@ class CameraPipController(
             }
 
             // ── DND & Quiet Hours Guard ─────────────────────────────────────────
-            val isCritical = req.priority.equals("critical", ignoreCase = true)
-            if (!isCritical && (AppPrefs.isDndEnabled(context) || AppPrefs.isCurrentlyInQuietHours(context))) {
-                Log.i(TAG, "Camera PiP suppressed by DND / Quiet Hours: ${req.cameraEntity ?: req.cameraAlias}")
+            val prio = req.priority?.lowercase() ?: "normal"
+            val bypassAll = prio == "critical"
+            val bypassQuietHours = bypassAll || prio == "high"
+            if (!bypassAll && AppPrefs.isDndEnabled(context)) {
+                Log.i(TAG, "Camera PiP suppressed by Cinema DND: ${req.cameraEntity ?: req.cameraAlias}")
+                return@runOnMain
+            }
+            if (!bypassQuietHours && AppPrefs.isCurrentlyInQuietHours(context)) {
+                Log.i(TAG, "Camera PiP suppressed by Quiet Hours: ${req.cameraEntity ?: req.cameraAlias}")
                 return@runOnMain
             }
 
+            // ── Auto-Dock during Fullscreen Video Playback ──────────────────────
+            val effectiveReq = if (AppPrefs.isAutoDockEnabled(context) && HAStateStore.isFullscreenMediaApp()) {
+                val dockedSize = if (req.size == null && req.sizePxW == null) "small" else req.size
+                val dockedPos = if (req.position == null) "top_right" else req.position
+                req.copy(size = dockedSize, position = dockedPos)
+            } else {
+                req
+            }
+
             // ── Multi-Camera Group Request (Grid / Split Dock) ──────────────────
-            if (req.cameras != null && req.cameras.isNotEmpty()) {
-                handleGroupRequest(req)
+            if (effectiveReq.cameras != null && effectiveReq.cameras.isNotEmpty()) {
+                handleGroupRequest(effectiveReq)
                 return@runOnMain
             }
 
             // ── Single Camera Request ───────────────────────────────────────────
-            handleSingleRequest(req)
+            handleSingleRequest(effectiveReq)
         } catch (t: Throwable) {
             Log.e(TAG, "handleRequest failed: ${t.message}", t)
             showToast("Failed to open camera")
@@ -453,7 +469,7 @@ class CameraPipController(
 
     private fun syncActiveTelemetry() {
         val activeIds = activeOverlays.values.map { it.spec.entityId }
-        HAStateStore.setActivePipIds(activeIds)
+        HAStateStore.setActivePipIds(activeIds, hostKey)
         BackgroundHaConnectionManager.publishTelemetryNow(context, trigger = "pip_change")
     }
 
@@ -532,6 +548,8 @@ class CameraPipController(
             muteAudio = req.muteAudio ?: false
         )
 
+        val snapshot = deriveGo2RtcSnapshotUrl(sanitized)
+
         return CameraPipSpec(
             url = sanitized,
             authToken = null,
@@ -545,8 +563,18 @@ class CameraPipController(
             autoHideTimeout = autoHide,
             rtspProfile = profile,
             slotKey = req.slot ?: corner,
-            autoCloseOnSleep = req.autoCloseOnSleep ?: true
+            autoCloseOnSleep = req.autoCloseOnSleep ?: true,
+            snapshotUrl = snapshot
         )
+    }
+
+    private fun deriveGo2RtcSnapshotUrl(rtspUrl: String): String? {
+        val u = Uri.parse(rtspUrl)
+        val host = u.host ?: return null
+        val port = u.port
+        val stream = u.path?.trim('/') ?: return null
+        if (stream.isEmpty()) return null
+        return if (port == 8554) "http://$host:1984/api/frame.jpeg?src=$stream" else null
     }
 
     private fun sanitizeRtspUserInfo(url: String): String {
@@ -697,6 +725,18 @@ class CameraPipController(
             muteAudio = req.muteAudio ?: false
         )
 
+        val snapshot = if (rtsp != null) {
+            deriveGo2RtcSnapshotUrl(rtsp)
+        } else {
+            val base = SecurePrefsManager.getHAUrl(context)?.trim()?.trimEnd('/')
+            if (!base.isNullOrBlank()) {
+                val normBase = if (!base.startsWith("http://") && !base.startsWith("https://")) {
+                    if (base.contains(":")) "http://$base" else "http://$base:8123"
+                } else base
+                "$normBase/api/camera_proxy/${entity.id}"
+            } else null
+        }
+
         return CameraPipSpec(
             url = finalUrl,
             authToken = finalToken,
@@ -710,7 +750,8 @@ class CameraPipController(
             autoHideTimeout = autoHide,
             rtspProfile = profile,
             slotKey = req.slot ?: corner,
-            autoCloseOnSleep = req.autoCloseOnSleep ?: true
+            autoCloseOnSleep = req.autoCloseOnSleep ?: true,
+            snapshotUrl = snapshot
         )
     }
 
