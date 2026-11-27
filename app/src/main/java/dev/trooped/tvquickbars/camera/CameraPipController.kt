@@ -515,7 +515,7 @@ class CameraPipController(
 
     private fun buildAdhocRtspSpec(req: CameraRequest): CameraPipSpec {
         val raw = requireNotNull(req.rtspUrl) { "rtspUrl is required" }.trim()
-        val sanitized = sanitizeRtspUserInfo(raw)
+        val sanitized = stripGo2RtcQueryIfNeeded(sanitizeRtspUserInfo(raw))
 
         val entityId = buildRtspEntityId(req.copy(rtspUrl = sanitized))
         val defaultCorner = "TOP_LEFT"
@@ -568,14 +568,21 @@ class CameraPipController(
         )
     }
 
-    private fun deriveGo2RtcSnapshotUrl(rtspUrl: String): String? {
+    /**
+     * Media3 RtspClient resolves relative `trackID=0` via RFC 3986, turning `?video` into
+     * `/stream/trackID=0?video`, which go2rtc rejects with SETUP 400. Strip `?video`/`?audio`
+     * on port 8554 URLs; audio is already disabled cleanly in ExoPlayer's TrackSelector.
+     */
+    private fun stripGo2RtcQueryIfNeeded(rtspUrl: String): String {
         val u = Uri.parse(rtspUrl)
-        val host = u.host ?: return null
-        val port = u.port
-        val stream = u.path?.trim('/') ?: return null
-        if (stream.isEmpty()) return null
-        return if (port == 8554) "http://$host:1984/api/frame.jpeg?src=$stream" else null
+        val q = u.query ?: return rtspUrl
+        if (u.port == 8554 && (q == "video" || q == "audio" || q == "video&audio")) {
+            return rtspUrl.substringBefore('?')
+        }
+        return rtspUrl
     }
+
+    private fun deriveGo2RtcSnapshotUrl(rtspUrl: String): String? = null
 
     private fun sanitizeRtspUserInfo(url: String): String {
         if (!url.startsWith("rtsp://", ignoreCase = true)) return url
