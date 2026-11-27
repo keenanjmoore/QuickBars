@@ -848,6 +848,10 @@ private fun CameraRtspView(
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         var focusReq: AudioFocusRequest? = null
         if (player != null) {
+            player.trackSelectionParameters = player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, config.muteAudio)
+                .build()
             player.volume = if (config.muteAudio) 0f else 1f
             if (!config.muteAudio && am != null) {
                 val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)

@@ -1015,14 +1015,16 @@ class CameraPipController(
             return if (SystemClock.elapsedRealtime() - entry.first <= 10_000L) entry.second else null
         }
 
+        /**
+         * Normalizes go2rtc RTSP URLs for AndroidX Media3 playback.
+         *
+         * Media3's RtspClient resolves SDP control attributes (`a=control:trackID=0`)
+         * relative to `rtsp://.../stream?video` into `.../stream/trackID=0?video`,
+         * which go2rtc rejects with `SETUP 400`. Audio muting is enforced via
+         * Media3 track selection and player volume instead.
+         */
         internal fun formatGo2RtcUrl(rtspUrl: String, muteAudio: Boolean): String {
-            val base = stripGo2RtcQueryIfNeeded(rtspUrl)
-            val atPort8554 = base.contains(":8554/")
-            return if (atPort8554 && muteAudio && !base.contains('?')) {
-                "$base?video"
-            } else {
-                base
-            }
+            return stripGo2RtcQueryIfNeeded(rtspUrl)
         }
 
         internal fun stripGo2RtcQueryIfNeeded(rtspUrl: String): String {

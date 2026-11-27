@@ -122,9 +122,9 @@ class QuickBarsHandlersTest {
     }
 
     @Test
-    fun go2rtc_url_appends_video_only_when_muted() {
+    fun go2rtc_url_strips_query_to_avoid_rtsp_setup_400() {
         val base = "rtsp://192.168.1.146:8554/front_door?video&audio"
-        assertEquals("rtsp://192.168.1.146:8554/front_door?video", CameraPipController.formatGo2RtcUrl(base, muteAudio = true))
+        assertEquals("rtsp://192.168.1.146:8554/front_door", CameraPipController.formatGo2RtcUrl(base, muteAudio = true))
         assertEquals("rtsp://192.168.1.146:8554/front_door", CameraPipController.formatGo2RtcUrl(base, muteAudio = false))
     }
 
