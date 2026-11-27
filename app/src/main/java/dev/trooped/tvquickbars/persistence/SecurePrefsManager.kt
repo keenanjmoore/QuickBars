@@ -2,8 +2,6 @@ package dev.trooped.tvquickbars.persistence
 
 import android.content.Context
 import dev.trooped.tvquickbars.utils.SecureStore
-import kotlinx.coroutines.runBlocking
-
 
 /**
  * SecurePrefsManager
@@ -14,23 +12,18 @@ object SecurePrefsManager {
 
     /* --------  synchronous façade used by the rest of the app -------- */
 
-    fun saveHAUrl(ctx: Context, url: String) = runBlocking {
+    fun saveHAUrl(ctx: Context, url: String) =
         SecureStore.setHAUrl(ctx, url)
-    }
 
-    fun getHAUrl(ctx: Context): String? = runBlocking {
+    fun getHAUrl(ctx: Context): String? =
         SecureStore.getHAUrl(ctx)
-    }
 
-    fun saveHAToken(ctx: Context, token: String) = runBlocking {
+    fun saveHAToken(ctx: Context, token: String) =
         SecureStore.setHAToken(ctx, token)
-    }
 
-    fun getHAToken(ctx: Context): String? = runBlocking {
+    fun getHAToken(ctx: Context): String? =
         SecureStore.getHAToken(ctx)
-    }
 
-    fun clearCredentials(ctx: Context) = runBlocking {
+    fun clearCredentials(ctx: Context) =
         SecureStore.clear(ctx)
-    }
 }

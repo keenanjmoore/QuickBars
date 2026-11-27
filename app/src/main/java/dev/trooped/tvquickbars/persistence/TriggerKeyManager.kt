@@ -17,12 +17,19 @@ import androidx.core.content.edit
  */
 class TriggerKeyManager(private val context: Context) {
     private val prefs = context.getSharedPreferences("HA_TriggerKeys", Context.MODE_PRIVATE)
+    private val cacheLock = Any()
     private val keyCache = SparseArray<TriggerKey>()
 
     init {
-        // Load all keys into cache on initialization
-        loadTriggerKeys().forEach { key ->
-            keyCache[key.keyCode] = key
+        rebuildCache(loadTriggerKeys())
+    }
+
+    private fun rebuildCache(keys: List<TriggerKey>) {
+        synchronized(cacheLock) {
+            keyCache.clear()
+            keys.forEach { key ->
+                keyCache.put(key.keyCode, key)
+            }
         }
     }
 
@@ -58,11 +65,8 @@ class TriggerKeyManager(private val context: Context) {
 
         prefs.edit { putString("trigger_keys", jsonArray.toString()) }
 
-        // Clear and rebuild the cache
-        keyCache.clear()
-        keys.forEach { key ->
-            keyCache[key.keyCode] = key
-        }
+        // Clear and rebuild the cache atomically under lock
+        rebuildCache(keys)
         return true
     }
 
@@ -70,10 +74,7 @@ class TriggerKeyManager(private val context: Context) {
      * Clear the cache of trigger keys.
      */
     fun clearCache() {
-        keyCache.clear()
-        loadTriggerKeys().forEach { key ->
-            keyCache[key.keyCode] = key
-        }
+        rebuildCache(loadTriggerKeys())
     }
 
     /**
@@ -167,15 +168,6 @@ class TriggerKeyManager(private val context: Context) {
         val success = saveTriggerKeys(keys)
 
         if (success) {
-            // Explicitly remove from cache if save succeeded
-            keyCache.remove(keyCode)
-
-            // Double-check to ensure it's gone
-            if (keyCache[keyCode] != null) {
-                Log.e("TriggerKeyManager", "Failed to remove key $keyCode from cache!")
-                keyCache.remove(keyCode)
-            }
-
             // Verify key is truly gone from storage
             val reloadedKeys = loadTriggerKeys()
             val stillExists = reloadedKeys.any { it.keyCode == keyCode }
@@ -201,20 +193,20 @@ class TriggerKeyManager(private val context: Context) {
             var needsUpdate = false
             var updatedKey = key
 
-            // Check and update single press action
-            if (key.singlePressActionType == "entity" || key.singlePressActionType == "camera_pip" && key.singlePressAction == entityId) {
+            // Check and update single press action (parenthesized precedence)
+            if ((key.singlePressActionType == "entity" || key.singlePressActionType == "camera_pip") && key.singlePressAction == entityId) {
                 updatedKey = updatedKey.copy(singlePressAction = null, singlePressActionType = null)
                 needsUpdate = true
             }
 
             // Check and update double press action
-            if (key.doublePressActionType == "entity" || key.doublePressActionType == "camera_pip" && key.doublePressAction == entityId) {
+            if ((key.doublePressActionType == "entity" || key.doublePressActionType == "camera_pip") && key.doublePressAction == entityId) {
                 updatedKey = updatedKey.copy(doublePressAction = null, doublePressActionType = null)
                 needsUpdate = true
             }
 
             // Check and update long press action
-            if (key.longPressActionType == "entity" || key.longPressActionType == "camera_pip" && key.longPressAction == entityId) {
+            if ((key.longPressActionType == "entity" || key.longPressActionType == "camera_pip") && key.longPressAction == entityId) {
                 updatedKey = updatedKey.copy(longPressAction = null, longPressActionType = null)
                 needsUpdate = true
             }
@@ -235,11 +227,6 @@ class TriggerKeyManager(private val context: Context) {
             }
 
             saveTriggerKeys(keys)
-
-            // Update cache for updated keys
-            for (updatedKey in keysToUpdate) {
-                keyCache[updatedKey.keyCode] = updatedKey
-            }
         }
 
         return keysToUpdate.size
@@ -266,9 +253,14 @@ class TriggerKeyManager(private val context: Context) {
      * @param code The key code to search for.
      */
     fun getTriggerKey(code: Int): TriggerKey? {
-        keyCache[code]?.let { return it }
-        loadTriggerKeys().find { it.keyCode == code }?.also { keyCache.put(code, it) }
-        return keyCache[code]
+        synchronized(cacheLock) {
+            keyCache.get(code)?.let { return it }
+            val loaded = loadTriggerKeys().find { it.keyCode == code }
+            if (loaded != null) {
+                keyCache.put(code, loaded)
+            }
+            return loaded
+        }
     }
 
     /**
@@ -287,12 +279,7 @@ class TriggerKeyManager(private val context: Context) {
             keys.add(key)
         }
 
-        val success = saveTriggerKeys(keys)
-
-        // Only update cache if disk save was successful
-        if (success) {
-            keyCache[key.keyCode] = key
-        }
+        saveTriggerKeys(keys)
     }
 
     /**

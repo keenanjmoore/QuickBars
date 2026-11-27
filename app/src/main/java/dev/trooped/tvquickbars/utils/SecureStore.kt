@@ -43,6 +43,7 @@ object SecureStore {
     private val Context.secureDataStore by preferencesDataStore(name = DS_NAME)
 
     @Volatile private var cachedToken: String? = null
+    @Volatile private var cachedUrl: String? = null
 
     /* ---------- public API ---------- */
 
@@ -50,9 +51,9 @@ object SecureStore {
 
     fun setHAToken(ctx: Context, token: String) = runBlocking { setHATokenAsync(ctx, token) }
 
-    fun getHAUrl(ctx: Context): String? = runBlocking { getHAUrlAsync(ctx) }
+    fun getHAUrl(ctx: Context): String? = cachedUrl ?: runBlocking { getHAUrlAsync(ctx) }
 
-    fun getHAToken(ctx: Context): String? = runBlocking { getHATokenAsync(ctx) }
+    fun getHAToken(ctx: Context): String? = cachedToken ?: runBlocking { getHATokenAsync(ctx) }
 
     fun clear(ctx: Context) = runBlocking { clearAsync(ctx) }
 
@@ -176,6 +177,7 @@ object SecureStore {
 
     suspend fun setHAUrlAsync(ctx: Context, url: String) {
         ctx.secureDataStore.edit { it[URL_KEY] = url }
+        cachedUrl = url
     }
 
     suspend fun setHATokenAsync(ctx: Context, token: String) {
@@ -183,11 +185,17 @@ object SecureStore {
         withContext(kotlinx.coroutines.Dispatchers.IO) {
             val enc = encrypt(token, ctx).base64
             ctx.secureDataStore.edit { prefs -> prefs[TOKEN_KEY] = enc }
+            cachedToken = token
         }
     }
 
     suspend fun getHAUrlAsync(ctx: Context): String? {
-        return ctx.secureDataStore.data.first()[URL_KEY]
+        cachedUrl?.let { return it }
+        val url = ctx.secureDataStore.data.first()[URL_KEY]
+        if (!url.isNullOrBlank()) {
+            cachedUrl = url
+        }
+        return url
     }
 
     suspend fun getHATokenAsync(ctx: Context): String? {
@@ -203,5 +211,6 @@ object SecureStore {
     suspend fun clearAsync(ctx: Context) {
         ctx.secureDataStore.edit { it.clear() }
         cachedToken = null
+        cachedUrl = null
     }
 }

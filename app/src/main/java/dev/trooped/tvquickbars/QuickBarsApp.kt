@@ -11,10 +11,12 @@ import com.revenuecat.purchases.PurchasesConfiguration
 import com.revenuecat.purchases.interfaces.UpdatedCustomerInfoListener
 import dev.trooped.tvquickbars.persistence.AppPrefs
 import dev.trooped.tvquickbars.data.AppIdProvider
+import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.utils.DemoModeManager
 import dev.trooped.tvquickbars.utils.PlusStatusManager
 import dev.trooped.tvquickbars.utils.SecureStore
+import dev.trooped.tvquickbars.utils.SharedHttpClients
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -49,14 +51,17 @@ class QuickBarsApp : Application(), Application.ActivityLifecycleCallbacks {
                 android.util.Log.e("QuickBarsApp", "Credential migration failed", e)
             }
 
-            // warm up keystore + cache token once
-            SecureStore.getHAToken(this@QuickBarsApp)
+            // Warm up keystore + dual-cache URL/Token off main thread to avoid cold-boot ANR
+            SecureStore.getHAUrlAsync(this@QuickBarsApp)
+            SecureStore.getHATokenAsync(this@QuickBarsApp)
+            SharedHttpClients.base
+            SavedEntitiesManager(this@QuickBarsApp).loadEntities()
 
-            // Run demo mode check in background
+            // Sync boot receiver & run demo mode check off main thread
+            if (AppPrefs.isPersistentConnectionEnabled(this@QuickBarsApp)) {
+                AppPrefs.setBootReceiverEnabled(this@QuickBarsApp, true)
+            }
             DemoModeManager.checkAndEnableDemoMode(this@QuickBarsApp)
-        }
-        if (AppPrefs.isPersistentConnectionEnabled(this)) {
-            AppPrefs.setBootReceiverEnabled(this, true)
         }
         registerActivityLifecycleCallbacks(this)
 

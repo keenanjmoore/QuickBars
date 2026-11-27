@@ -19,6 +19,18 @@ object AppPrefs {
     private const val KEY_FIRST_TIME_SETUP = "pref_first_time_setup_in_progress"
     private const val KEY_LAST_SEEN_VERSION = "pref_last_seen_version"
     private const val KEY_SHOW_TOAST_ON_ENTITY_TRIGGER = "pref_show_toast_on_entity_trigger"
+    private const val KEY_DND_ENABLED = "pref_dnd_enabled"
+    private const val KEY_AUTO_DOCK_ENABLED = "pref_auto_dock_enabled"
+    private const val KEY_DEFAULT_CAMERA_AUTO_HIDE = "pref_default_camera_auto_hide"
+    private const val KEY_PIP_MAX_SLOTS = "pref_pip_max_slots"
+    private const val KEY_QUIET_HOURS_ENABLED = "pref_quiet_hours_enabled"
+    private const val KEY_QUIET_HOURS_START = "pref_quiet_hours_start_hour"
+    private const val KEY_QUIET_HOURS_END = "pref_quiet_hours_end_hour"
+    private const val KEY_TELEMETRY_INTERVAL_SEC = "pref_telemetry_interval_sec"
+    private const val KEY_RT_LATENCY_MODE = "pref_rtsp_latency_mode"
+    private const val KEY_HA_DEVICE_ALIAS = "pref_ha_device_alias"
+
+    @Volatile private var cachedVersionCode: Int? = null
 
     fun isPersistentConnectionEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE)
@@ -94,7 +106,100 @@ object AppPrefs {
      * Gets the current app version code
      */
     fun getCurrentAppVersion(ctx: Context): Int {
-        return ctx.packageManager.getPackageInfo(ctx.packageName, 0).longVersionCode.toInt()
+        cachedVersionCode?.let { return it }
+        val vc = ctx.packageManager.getPackageInfo(ctx.packageName, 0).longVersionCode.toInt()
+        cachedVersionCode = vc
+        return vc
+    }
+
+    fun isDndEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_DND_ENABLED, false)
+
+    fun setDndEnabled(ctx: Context, enabled: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit { putBoolean(KEY_DND_ENABLED, enabled) }
+    }
+
+    fun isAutoDockEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_AUTO_DOCK_ENABLED, true)
+
+    fun setAutoDockEnabled(ctx: Context, enabled: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit { putBoolean(KEY_AUTO_DOCK_ENABLED, enabled) }
+    }
+
+    fun getDefaultCameraAutoHideSeconds(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_DEFAULT_CAMERA_AUTO_HIDE, 30)
+
+    fun setDefaultCameraAutoHideSeconds(ctx: Context, seconds: Int) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
+            putInt(KEY_DEFAULT_CAMERA_AUTO_HIDE, seconds.coerceIn(0, 600))
+        }
+    }
+
+    fun getPipMaxSlots(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_PIP_MAX_SLOTS, 4).coerceIn(1, 4)
+
+    fun setPipMaxSlots(ctx: Context, maxSlots: Int) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
+            putInt(KEY_PIP_MAX_SLOTS, maxSlots.coerceIn(1, 4))
+        }
+    }
+
+    fun isQuietHoursEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_QUIET_HOURS_ENABLED, false)
+
+    fun getQuietHoursStartHour(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_QUIET_HOURS_START, 23)
+
+    fun getQuietHoursEndHour(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_QUIET_HOURS_END, 7)
+
+    fun setQuietHoursConfig(ctx: Context, enabled: Boolean, startHour: Int, endHour: Int) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
+            putBoolean(KEY_QUIET_HOURS_ENABLED, enabled)
+            putInt(KEY_QUIET_HOURS_START, startHour.coerceIn(0, 23))
+            putInt(KEY_QUIET_HOURS_END, endHour.coerceIn(0, 23))
+        }
+    }
+
+    /** Returns true if current wall-clock hour falls inside configured quiet hours window. */
+    fun isCurrentlyInQuietHours(ctx: Context): Boolean {
+        if (!isQuietHoursEnabled(ctx)) return false
+        val start = getQuietHoursStartHour(ctx)
+        val end = getQuietHoursEndHour(ctx)
+        if (start == end) return false
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        return if (start < end) {
+            hour in start until end
+        } else {
+            hour >= start || hour < end
+        }
+    }
+
+    fun getTelemetryIntervalSec(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_TELEMETRY_INTERVAL_SEC, 60).coerceIn(15, 3600)
+
+    fun setTelemetryIntervalSec(ctx: Context, seconds: Int) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
+            putInt(KEY_TELEMETRY_INTERVAL_SEC, seconds.coerceIn(15, 3600))
+        }
+    }
+
+    fun getRtspLatencyMode(ctx: Context): String? =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getString(KEY_RT_LATENCY_MODE, null)
+
+    fun setRtspLatencyMode(ctx: Context, mode: String?) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
+            if (mode.isNullOrBlank()) remove(KEY_RT_LATENCY_MODE) else putString(KEY_RT_LATENCY_MODE, mode)
+        }
+    }
+
+    fun getHaDeviceAlias(ctx: Context): String? =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getString(KEY_HA_DEVICE_ALIAS, null)
+
+    fun setHaDeviceAlias(ctx: Context, alias: String?) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
+            if (alias.isNullOrBlank()) remove(KEY_HA_DEVICE_ALIAS) else putString(KEY_HA_DEVICE_ALIAS, alias.trim())
+        }
     }
 
     fun isShowToastOnEntityTriggerEnabled(ctx: Context): Boolean =

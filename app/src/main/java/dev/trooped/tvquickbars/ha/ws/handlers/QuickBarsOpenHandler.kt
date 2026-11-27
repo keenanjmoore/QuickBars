@@ -1,12 +1,10 @@
 package dev.trooped.tvquickbars.ha.ws.handlers
 
+import android.util.Log
 import dev.trooped.tvquickbars.camera.CameraRequest
 import dev.trooped.tvquickbars.ha.ws.HaClientBridge
+import dev.trooped.tvquickbars.ha.ws.TargetMatcher
 import org.json.JSONObject
-import android.util.Log
-import androidx.annotation.OptIn
-import androidx.media3.common.util.UnstableApi
-import dev.trooped.tvquickbars.data.AppIdProvider
 
 class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
     private val TAG = "QuickBarsOpenHandler"
@@ -16,11 +14,9 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
         return eventType == "quickbars.open"
     }
 
-    @OptIn(UnstableApi::class)
     override fun handle(event: JSONObject, ctx: HaClientBridge) {
-        val context = ctx.getContext()
-        if (context == null) {
-            androidx.media3.common.util.Log.w(TAG, "Cannot handle event: Context is not available.")
+        val context = ctx.getContext() ?: run {
+            Log.w(TAG, "Cannot handle event: Context is not available.")
             return
         }
 
@@ -30,13 +26,8 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             return
         }
 
-        val targetId = data.optString("id", "")
-        if (targetId.isNotEmpty()) {
-            val myId = AppIdProvider.get(context) ?: ""
-            if (!targetId.equals(myId, ignoreCase = true)) {
-                Log.d("HAClient", "$eventType ignored (targetId=$targetId, myId=$myId)")
-                return
-            }
+        if (!TargetMatcher.matches(context, data)) {
+            return
         }
 
         // Action specified in quickbars.open
@@ -112,26 +103,31 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
         val sizePx = obj.optJSONObject("size_px")
 
         return CameraRequest(
-            cameraAlias = obj.optString("camera_alias", null)?.takeIf { it.isNotBlank() },
-            cameraEntity = obj.optString("camera_entity", null)?.takeIf { it.isNotBlank() },
-            position = obj.optString("position", null)?.takeIf { it.isNotBlank() },
-            size = obj.optString("size", null)?.takeIf { it.isNotBlank() },
+            cameraAlias = obj.optString("camera_alias", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            cameraEntity = obj.optString("camera_entity", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            position = (obj.optString("position", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+                ?: obj.optString("corner", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }),
+            size = obj.optString("size", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             sizePxW = sizePx?.optInt("w"),
             sizePxH = sizePx?.optInt("h"),
-            autoHideSec = if (obj.has("auto_hide")) obj.optInt("auto_hide") else null,
-            showTitle = if (obj.has("show_title")) obj.optBoolean("show_title") else null,
+            autoHideSec = if (obj.has("auto_hide") && !obj.isNull("auto_hide")) obj.optInt("auto_hide") else null,
+            showTitle = if (obj.has("show_title") && !obj.isNull("show_title")) obj.optBoolean("show_title") else null,
             rtspUrl = rtspFromEvent,
             customTitle = obj.optString("camera_title", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
                 ?: obj.optString("title", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
-            muteAudio = if (obj.has("mute_audio")) obj.optBoolean("mute_audio") else null,
-            showToggleToast = if (obj.has("show_toast")) obj.optBoolean("show_toast") else null,
-            rtspTransport = obj.optString("rtsp_transport", null),
-            rtspLatency = obj.optString("rtsp_latency", null),
-            useSoftwareDecoder = if (obj.has("software_decoder")) obj.optBoolean("software_decoder") else null,
-            action = obj.optString("action", null)?.takeIf { it.isNotBlank() },
-            slot = obj.optString("slot", null)?.takeIf { it.isNotBlank() },
-            layout = obj.optString("layout", null)?.takeIf { it.isNotBlank() },
-            allowMultiple = if (obj.has("allow_multiple")) obj.optBoolean("allow_multiple") else true
+            muteAudio = if (obj.has("mute_audio") && !obj.isNull("mute_audio")) obj.optBoolean("mute_audio") else null,
+            showToggleToast = if (obj.has("show_toast") && !obj.isNull("show_toast")) obj.optBoolean("show_toast") else null,
+            rtspTransport = obj.optString("rtsp_transport", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            rtspLatency = obj.optString("rtsp_latency", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            useSoftwareDecoder = if (obj.has("software_decoder") && !obj.isNull("software_decoder")) obj.optBoolean("software_decoder") else null,
+            action = obj.optString("action", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            slot = obj.optString("slot", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            layout = obj.optString("layout", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            allowMultiple = if (obj.has("allow_multiple") && !obj.isNull("allow_multiple")) obj.optBoolean("allow_multiple") else true,
+            onRetrigger = obj.optString("on_retrigger", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            aspectRatio = obj.optString("aspect_ratio", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            autoCloseOnSleep = if (obj.has("auto_close_on_sleep") && !obj.isNull("auto_close_on_sleep")) obj.optBoolean("auto_close_on_sleep") else null,
+            priority = obj.optString("priority", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
         )
     }
 }

@@ -39,6 +39,18 @@ import java.lang.reflect.Type
 class SavedEntitiesManager(val context: Context) {
     private val prefs = context.getSharedPreferences("HA_Saved_Entities", Context.MODE_PRIVATE)
     private val entitiesKey = "saved_entity_list"
+
+    companion object {
+        private val cacheLock = Any()
+        @Volatile
+        private var cachedEntities: List<EntityItem>? = null
+
+        fun invalidateCache() {
+            synchronized(cacheLock) {
+                cachedEntities = null
+            }
+        }
+    }
     val gson = GsonBuilder()
         .registerTypeAdapter(EntityAction::class.java, EntityActionTypeAdapter())
         .registerTypeAdapter(
@@ -233,6 +245,9 @@ class SavedEntitiesManager(val context: Context) {
 
         val jsonString = gson.toJson(entitiesToSave)
         prefs.edit() { putString(entitiesKey, jsonString) }
+        synchronized(cacheLock) {
+            cachedEntities = entitiesToSave.map { it.copy(lastKnownState = it.lastKnownState.toMutableMap()) }
+        }
     }
 
     fun saveEntity(entity: EntityItem) {
@@ -333,9 +348,15 @@ class SavedEntitiesManager(val context: Context) {
     }
 
     /**
-     * Load a list of entities from SharedPreferences.
+     * Load a list of entities from SharedPreferences (or memory cache when available).
      */
     fun loadEntities(): MutableList<EntityItem> {
+        synchronized(cacheLock) {
+            cachedEntities?.let { cached ->
+                return cached.mapTo(mutableListOf()) { it }
+            }
+        }
+
         val jsonString = prefs.getString(entitiesKey, null)
         val entities = if (jsonString != null) {
             try {
@@ -356,11 +377,6 @@ class SavedEntitiesManager(val context: Context) {
                     }
 
                     it.isAvailable = true
-
-                    // Initialize lastKnownState if it's null
-                    if (it.lastKnownState == null) {
-                        it.lastKnownState = mutableMapOf()
-                    }
 
                     // Initialize pressActions if it's null
                     if (it.pressActions == null) {
@@ -404,6 +420,10 @@ class SavedEntitiesManager(val context: Context) {
         // If any entities were fixed, save them back
         if (validatedEntities.second) {
             saveEntities(validatedEntities.first)
+        } else {
+            synchronized(cacheLock) {
+                cachedEntities = validatedEntities.first.toList()
+            }
         }
 
         return validatedEntities.first

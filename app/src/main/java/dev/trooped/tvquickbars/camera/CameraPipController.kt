@@ -5,6 +5,7 @@ import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.view.Choreographer
@@ -24,6 +25,9 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
 import dev.trooped.tvquickbars.QuickBarsApp
 import dev.trooped.tvquickbars.R
+import dev.trooped.tvquickbars.background.BackgroundHaConnectionManager
+import dev.trooped.tvquickbars.background.HAStateStore
+import dev.trooped.tvquickbars.persistence.AppPrefs
 import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.data.EntityItem
@@ -74,7 +78,7 @@ class CameraPipController(
                 null -> triggerKeyToggle
             }
 
-            // ── Explicit Close Actions ──────────────────────────────────────────
+            // ── Explicit Close Actions (never blocked by DND or Sleep Guard) ────
             val action = req.action?.lowercase()
             if (action == "close_all") {
                 hideAll()
@@ -83,6 +87,22 @@ class CameraPipController(
             if (action == "close") {
                 val target = req.slot ?: req.cameraEntity ?: req.cameraAlias
                 hide(target)
+                return@runOnMain
+            }
+
+            // ── Screen Sleep Guard: never leak HW decoders on sleeping TVs ──────
+            if (req.autoCloseOnSleep != false) {
+                val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                if (pm != null && !pm.isInteractive) {
+                    Log.i(TAG, "Display is off/asleep; skipping PiP open for ${req.cameraEntity ?: req.cameraAlias ?: req.rtspUrl}")
+                    return@runOnMain
+                }
+            }
+
+            // ── DND & Quiet Hours Guard ─────────────────────────────────────────
+            val isCritical = req.priority.equals("critical", ignoreCase = true)
+            if (!isCritical && (AppPrefs.isDndEnabled(context) || AppPrefs.isCurrentlyInQuietHours(context))) {
+                Log.i(TAG, "Camera PiP suppressed by DND / Quiet Hours: ${req.cameraEntity ?: req.cameraAlias}")
                 return@runOnMain
             }
 
@@ -149,13 +169,15 @@ class CameraPipController(
             slotKey = slotKey,
             isGroup = true,
             groupSpecs = subSpecs,
-            groupLayout = layout
+            groupLayout = layout,
+            autoCloseOnSleep = req.autoCloseOnSleep ?: true
         )
 
         if (showToastOnToggle && !activeOverlays.containsKey(slotKey)) {
             showToast("$title → PIP")
         }
-        show(groupSpec)
+        val onRetrigger = req.onRetrigger ?: if (req.action.equals("toggle", true)) "toggle" else "extend"
+        show(groupSpec, onRetrigger = onRetrigger)
     }
 
     /** Handles standard single camera requests. */
@@ -209,13 +231,17 @@ class CameraPipController(
         val finalSpec = baseSpec.copy(
             cornerPosition = corner,
             slotKey = targetSlot,
-            rtspProfile = baseSpec.rtspProfile.copy(muteAudio = shouldMute)
+            rtspProfile = baseSpec.rtspProfile.copy(muteAudio = shouldMute),
+            autoCloseOnSleep = req.autoCloseOnSleep ?: baseSpec.autoCloseOnSleep
         )
+
+        val defaultRetrigger = if (req.action == null || req.action.equals("open", true)) "extend" else "toggle"
+        val onRetrigger = req.onRetrigger?.lowercase() ?: defaultRetrigger
 
         if (!activeOverlays.containsKey(targetSlot) && showToastOnToggle) {
             showToast("${finalSpec.title} → PIP")
         }
-        show(finalSpec)
+        show(finalSpec, onRetrigger = onRetrigger)
     }
 
     /** Finds an available corner slot, or falls back to defaultCorner. */
@@ -228,7 +254,7 @@ class CameraPipController(
     }
 
     @MainThread
-    fun show(spec: CameraPipSpec): Unit = runOnMain {
+    fun show(spec: CameraPipSpec, onRetrigger: String = "toggle"): Unit = runOnMain {
         if (!Settings.canDrawOverlays(context)) {
             showToast("Overlay permission required")
             return@runOnMain
@@ -240,20 +266,34 @@ class CameraPipController(
         val existing = activeOverlays[slotKey]
         if (existing != null) {
             if (existing.spec.entityId == spec.entityId) {
-                hide(slotKey) // toggle off
-                return@runOnMain
+                when (onRetrigger.lowercase()) {
+                    "ignore" -> return@runOnMain
+                    "extend" -> {
+                        existing.hideHandler.removeCallbacks(existing.hideRunnable)
+                        val newTimeout = spec.autoHideTimeout
+                        if (newTimeout > 0) {
+                            existing.hideHandler.postDelayed(existing.hideRunnable, newTimeout * 1000L)
+                        }
+                        Log.d(TAG, "Extended active PiP countdown in slot $slotKey to ${newTimeout}s")
+                        return@runOnMain
+                    }
+                    "restart" -> hide(slotKey)
+                    else -> { // "toggle"
+                        hide(slotKey)
+                        return@runOnMain
+                    }
+                }
             } else {
                 hide(slotKey) // replace stream in this slot
             }
         }
 
-        // Hardware Decoder Concurrency Guard: Limit to max 4 concurrent streams
-        if (activeOverlays.size >= 4) {
-            val oldestKey = activeOverlays.keys.firstOrNull()
-            if (oldestKey != null) {
-                Log.w(TAG, "Exceeded 4 concurrent streams; recycling oldest slot: $oldestKey")
-                hide(oldestKey)
-            }
+        // Hardware Decoder Concurrency Guard: Respect AppPrefs pip_max_slots (capped at 4)
+        val maxSlots = AppPrefs.getPipMaxSlots(context).coerceIn(1, 4)
+        while (activeOverlays.size >= maxSlots) {
+            val oldestKey = activeOverlays.keys.firstOrNull() ?: break
+            Log.w(TAG, "Reached maxSlots ($maxSlots); recycling oldest slot: $oldestKey")
+            hide(oldestKey)
         }
 
         // Dedicated Compose lifecycle for this overlay surface
@@ -336,6 +376,7 @@ class CameraPipController(
                 hideHandler = hideHandler,
                 hideRunnable = hideRunnable
             )
+            syncActiveTelemetry()
         } catch (e: Exception) {
             Log.e(TAG, "Error adding camera overlay to WindowManager for slot $slotKey", e)
             try { lifecycleOwner.destroy() } catch (_: Throwable) {}
@@ -390,6 +431,17 @@ class CameraPipController(
         }
     }
 
+    /** Closes all active camera overlays that allow sleep auto-close. */
+    @MainThread
+    fun hideAutoCloseOverlays(): Unit = runOnMain {
+        val keysToClose = activeOverlays.entries
+            .filter { it.value.spec.autoCloseOnSleep }
+            .map { it.key }
+        for (key in keysToClose) {
+            teardownOverlay(key)
+        }
+    }
+
     /** Closes all active camera overlays. */
     @MainThread
     fun hideAll(): Unit = runOnMain {
@@ -397,6 +449,12 @@ class CameraPipController(
         for (key in keys) {
             teardownOverlay(key)
         }
+    }
+
+    private fun syncActiveTelemetry() {
+        val activeIds = activeOverlays.values.map { it.spec.entityId }
+        HAStateStore.setActivePipIds(activeIds)
+        BackgroundHaConnectionManager.publishTelemetryNow(context, trigger = "pip_change")
     }
 
     private fun teardownOverlay(slotKey: String) {
@@ -419,6 +477,7 @@ class CameraPipController(
             try { windowManager.removeView(view) } catch (_: Throwable) {}
         }
         try { owner.destroy() } catch (_: Throwable) {}
+        syncActiveTelemetry()
     }
 
     @MainThread
@@ -447,7 +506,7 @@ class CameraPipController(
         val defaultSize = "MEDIUM"
         val corner = mapCornerOverride(req.position) ?: defaultCorner
         val (wDp, hDp) = chooseSize(req, defaultSize)
-        val autoHide = req.autoHideSec ?: 30
+        val autoHide = req.autoHideSec ?: AppPrefs.getDefaultCameraAutoHideSeconds(context)
         val showTitle = req.showTitle ?: true
         val title = req.customTitle?.takeIf { !it.isNullish() }?.trim() ?: "Camera"
 
@@ -458,7 +517,8 @@ class CameraPipController(
             else -> TransportProtocol.TCP
         }
 
-        val latency = when (req.rtspLatency?.lowercase()) {
+        val latencyStr = req.rtspLatency?.takeIf { it.isNotBlank() } ?: AppPrefs.getRtspLatencyMode(context)
+        val latency = when (latencyStr?.lowercase()) {
             "low" -> StreamLatency.LOW_LATENCY
             "high" -> StreamLatency.HIGH_STABILITY
             "balanced" -> StreamLatency.BALANCED
@@ -484,7 +544,8 @@ class CameraPipController(
             cornerPosition = corner,
             autoHideTimeout = autoHide,
             rtspProfile = profile,
-            slotKey = req.slot ?: corner
+            slotKey = req.slot ?: corner,
+            autoCloseOnSleep = req.autoCloseOnSleep ?: true
         )
     }
 
@@ -589,7 +650,8 @@ class CameraPipController(
             if (baseUrl != null && !baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
                 baseUrl = if (baseUrl.contains(":")) "http://$baseUrl" else "http://$baseUrl:8123"
             }
-            "${baseUrl}/api/camera_proxy_stream/${entity.id}" to authToken
+            val cleanBase = (baseUrl ?: "").trimEnd('/')
+            "${cleanBase}/api/camera_proxy_stream/${entity.id}" to authToken
         }
 
         val defaultCorner = (entity.lastKnownState["pip_corner"] as? String) ?: "TOP_LEFT"
@@ -597,7 +659,7 @@ class CameraPipController(
         val defaultTitle = (entity.lastKnownState["show_title"] as? Boolean) ?: true
         val defaultAuto = ((entity.lastKnownState["auto_hide_timeout"] as? Number)?.toInt())
             ?: ((entity.lastKnownState["auto_hide_timeout"] as? String)?.toIntOrNull())
-            ?: 30
+            ?: AppPrefs.getDefaultCameraAutoHideSeconds(context)
 
         val corner = mapCornerOverride(req.position) ?: defaultCorner
         val (wDp, hDp) = chooseSize(req, defaultSize)
@@ -620,7 +682,8 @@ class CameraPipController(
             else -> TransportProtocol.TCP
         }
 
-        val latency = when (req.rtspLatency?.lowercase()) {
+        val latencyStr = req.rtspLatency?.takeIf { it.isNotBlank() } ?: AppPrefs.getRtspLatencyMode(context)
+        val latency = when (latencyStr?.lowercase()) {
             "low" -> StreamLatency.LOW_LATENCY
             "high" -> StreamLatency.HIGH_STABILITY
             "balanced" -> StreamLatency.BALANCED
@@ -646,7 +709,8 @@ class CameraPipController(
             cornerPosition = corner,
             autoHideTimeout = autoHide,
             rtspProfile = profile,
-            slotKey = req.slot ?: corner
+            slotKey = req.slot ?: corner,
+            autoCloseOnSleep = req.autoCloseOnSleep ?: true
         )
     }
 
@@ -674,7 +738,7 @@ class CameraPipController(
             return wDp to hDp
         }
 
-        val base = when (req.size?.lowercase()) {
+        val rawBase = when (req.size?.lowercase()) {
             "small"  -> 200 to 112
             "medium" -> 280 to 158
             "large"  -> 360 to 202
@@ -684,6 +748,12 @@ class CameraPipController(
                 "LARGE"  -> 360 to 202
                 else     -> 280 to 158
             }
+        }
+
+        val base = when (req.aspectRatio?.trim()?.lowercase()) {
+            "4:3", "4/3" -> rawBase.first to (rawBase.first * 3 / 4)
+            "1:1", "square" -> rawBase.first to rawBase.first
+            else -> rawBase
         }
 
         if (!isGroup || groupCount <= 1) {

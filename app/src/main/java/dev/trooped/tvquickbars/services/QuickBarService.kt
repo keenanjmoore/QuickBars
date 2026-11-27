@@ -376,6 +376,23 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         }
     }
 
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF, Intent.ACTION_DREAMING_STARTED -> {
+                    Log.i("QuickBarService", "Screen off / dream started -> closing auto-close camera PiPs")
+                    if (::camera.isInitialized) {
+                        camera.hideAutoCloseOverlays()
+                    }
+                    BackgroundHaConnectionManager.publishTelemetryNow(applicationContext, trigger = "screen_off")
+                }
+                Intent.ACTION_SCREEN_ON, Intent.ACTION_DREAMING_STOPPED -> {
+                    BackgroundHaConnectionManager.publishTelemetryNow(applicationContext, trigger = "screen_on")
+                }
+            }
+        }
+    }
+
 
     companion object {
         @Volatile
@@ -495,6 +512,19 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
             reloadReceiver,
             IntentFilter("ACTION_RELOAD_TRIGGER_KEYS"),
             ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
+        val screenFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_DREAMING_STARTED)
+            addAction(Intent.ACTION_DREAMING_STOPPED)
+        }
+        ContextCompat.registerReceiver(
+            this,
+            screenStateReceiver,
+            screenFilter,
+            ContextCompat.RECEIVER_EXPORTED
         )
 
 
@@ -1788,26 +1818,25 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
      */
     override fun onEntitiesFetched(categories: List<CategoryItem>) {
         val entityMap = categories.flatMap { it.entities }.associateBy { it.id }
-
-        val updatedEntities = entitiesState.map { existingEntity ->
-            // If a new version exists from HA, merge its properties
-            entityMap[existingEntity.id]?.let { newEntity ->
-                existingEntity.copy(
-                    friendlyName = newEntity.friendlyName,
-                    state = newEntity.state,
-                    attributes = newEntity.attributes,
-                    isActionable = newEntity.isActionable,
-                    // PRESERVE THESE CUSTOM PROPERTIES:
-                    customName = existingEntity.customName,
-                    pressActions      = existingEntity.pressActions,
-                    customIconOnName = existingEntity.customIconOnName,
-                    customIconOffName = existingEntity.customIconOffName,
-                    lastKnownState = existingEntity.lastKnownState
-                )
-            } ?: existingEntity
+        runOnMain {
+            val updatedEntities = entitiesState.map { existingEntity ->
+                entityMap[existingEntity.id]?.let { newEntity ->
+                    existingEntity.copy(
+                        friendlyName = newEntity.friendlyName,
+                        state = newEntity.state,
+                        attributes = newEntity.attributes,
+                        isActionable = newEntity.isActionable,
+                        customName = existingEntity.customName,
+                        pressActions = existingEntity.pressActions,
+                        customIconOnName = existingEntity.customIconOnName,
+                        customIconOffName = existingEntity.customIconOffName,
+                        lastKnownState = existingEntity.lastKnownState
+                    )
+                } ?: existingEntity
+            }
+            entitiesState.clear()
+            entitiesState.addAll(updatedEntities)
         }
-        entitiesState.clear()
-        entitiesState.addAll(updatedEntities)
     }
 
     /**
@@ -1826,11 +1855,12 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         }
         lastEntityUpdateTime[entityId] = currentTime
 
-        val index = entitiesState.indexOfFirst { it.id == entityId }
-        if (index != -1 && (entitiesState[index].state != newState ||
-                    entitiesState[index].attributes != attributes)) {
-            // Only update if state actually changed
-            entitiesState[index] = entitiesState[index].copy(state = newState, attributes = attributes)
+        runOnMain {
+            val index = entitiesState.indexOfFirst { it.id == entityId }
+            if (index != -1 && (entitiesState[index].state != newState ||
+                        entitiesState[index].attributes != attributes)) {
+                entitiesState[index] = entitiesState[index].copy(state = newState, attributes = attributes)
+            }
         }
     }
 
@@ -1854,6 +1884,14 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         if (!BackgroundHaConnectionManager.isRunning()) {
             haClient?.disconnect()
         }
+
+        try {
+            unregisterReceiver(reloadReceiver)
+        } catch (_: Throwable) {}
+
+        try {
+            unregisterReceiver(screenStateReceiver)
+        } catch (_: Throwable) {}
 
         try {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(entityActionReceiver)

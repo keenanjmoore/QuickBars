@@ -12,8 +12,8 @@ android {
         applicationId = "dev.trooped.tvquickbars"
         minSdk = 28
         targetSdk = 35
-        versionCode = 29
-        versionName = "1.3.7"
+        versionCode = 30
+        versionName = "1.4.0"
         buildConfigField("String", "REVENUECAT_API_KEY", findProperty("REVENUECAT_API_KEY") as String? ?: "\"\"")
     }
 
@@ -27,19 +27,23 @@ android {
         create("release") {
             // Read properties for the keystore file location and passwords
             val keystorePath = findProperty("HA_QUICKBARS_KEYSTORE_FILE") as String?
+            val customKeystore = keystorePath?.takeIf { it.isNotBlank() }?.let { file(it) }?.takeIf { it.exists() }
 
-            if (keystorePath != null) {
-                val keystoreFile = file(keystorePath)
-                if (keystoreFile.exists()) {
-                    storeFile = keystoreFile
-                    storePassword = System.getenv("HA_QUICKBARS_KEYSTORE_PASSWORD") ?: findProperty(
-                        "HA_QUICKBARS_KEYSTORE_PASSWORD"
-                    ) as String?
-                    keyAlias = System.getenv("HA_QUICKBARS_KEY_ALIAS")
-                        ?: findProperty("HA_QUICKBARS_KEY_ALIAS") as String?
-                    keyPassword = System.getenv("HA_QUICKBARS_KEY_PASSWORD")
-                        ?: findProperty("HA_QUICKBARS_KEY_PASSWORD") as String?
-                }
+            if (customKeystore != null) {
+                storeFile = customKeystore
+                storePassword = System.getenv("HA_QUICKBARS_KEYSTORE_PASSWORD") ?: findProperty(
+                    "HA_QUICKBARS_KEYSTORE_PASSWORD"
+                ) as String?
+                keyAlias = System.getenv("HA_QUICKBARS_KEY_ALIAS")
+                    ?: findProperty("HA_QUICKBARS_KEY_ALIAS") as String?
+                keyPassword = System.getenv("HA_QUICKBARS_KEY_PASSWORD")
+                    ?: findProperty("HA_QUICKBARS_KEY_PASSWORD") as String?
+            } else {
+                // Fall back to project debug.keystore so release builds upgrade existing installs in-place
+                storeFile = file("debug.keystore")
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
             }
         }
     }

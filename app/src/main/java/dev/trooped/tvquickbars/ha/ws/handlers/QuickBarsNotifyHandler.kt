@@ -1,38 +1,41 @@
 package dev.trooped.tvquickbars.ha.ws.handlers
 
-import androidx.annotation.OptIn
-import androidx.media3.common.util.Log
-import androidx.media3.common.util.UnstableApi
-import dev.trooped.tvquickbars.data.AppIdProvider
+import android.util.Log
 import dev.trooped.tvquickbars.ha.ws.HaClientBridge
+import dev.trooped.tvquickbars.ha.ws.TargetMatcher
 import dev.trooped.tvquickbars.notification.NotificationSpec
 import dev.trooped.tvquickbars.notification.toNotificationSpec
+import dev.trooped.tvquickbars.persistence.AppPrefs
 import org.json.JSONObject
 
 class QuickBarsNotifyHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
-    private val TAG = "QuickBarsNotifyHandler" // Optional: for logging
+    private val TAG = "QuickBarsNotifyHandler"
 
     override fun canHandle(event: JSONObject): Boolean =
         event.optString("event_type") == "quickbars.notify"
 
-    @OptIn(UnstableApi::class)
     override fun handle(event: JSONObject, ctx: HaClientBridge) {
-        val context = ctx.getContext()
-        if (context == null) {
+        val context = ctx.getContext() ?: run {
             Log.w(TAG, "Cannot handle notification event: Context is not available.")
             return
         }
 
         val data = event.optJSONObject("data") ?: return
 
-        val targetId = data.optString("id", "")         // set by HA service
-        val myId = AppIdProvider.get(context) ?: ""
-        if (targetId.isNotEmpty() && !targetId.equals(myId, ignoreCase = true)) {
-            return // not for this TV → ignore
+        if (!TargetMatcher.matches(context, data)) {
+            return
         }
-        // If targetId is missing, we accept it, per the notifications design.
 
-        val cid = data.optString("cid", null)
+        val bypassDnd = data.optBoolean("force", false) ||
+            data.optBoolean("bypass_dnd", false) ||
+            data.optString("priority", "").equals("critical", ignoreCase = true)
+
+        if (!bypassDnd && (AppPrefs.isDndEnabled(context) || AppPrefs.isCurrentlyInQuietHours(context))) {
+            Log.i(TAG, "Notification suppressed by DND / Quiet Hours")
+            return
+        }
+
+        val cid = data.optString("cid", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
         val spec: NotificationSpec = data.toNotificationSpec(cid)
         ctx.listener.onNotifyReceived(spec)
     }

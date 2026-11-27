@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build and Package Debug APK
+    name: Build and Package QuickBars APKs
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -25,10 +25,17 @@ jobs:
       - name: Make Gradlew Executable
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Build Release & Debug APKs
+        run: ./gradlew assembleRelease assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK Artifact
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickBars-Release-APK
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 7
+
+      - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: QuickBars-Debug-APK

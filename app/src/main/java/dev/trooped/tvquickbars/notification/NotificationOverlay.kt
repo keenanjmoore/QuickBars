@@ -58,28 +58,17 @@ import kotlinx.coroutines.withContext
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
+import dev.trooped.tvquickbars.utils.SharedHttpClients
 import androidx.core.net.toUri
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
 
 /**
- * Simple image overlay:
- * - If imageUrl is provided → fetch once and show.
- * - If iconSvgDataUri is provided but no image → (ignore for now; can add SVG renderer later).
- * - Background color uses "#RRGGBB" + transparency (0..1) if provided.
+ * Shared SVG bitmap LRU cache + shared HTTP client to avoid repeated Iconify/SVG downloads
+ * and allocations across alerts.
  */
-private object IconHttp {
-    val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            // small, sensible timeouts to avoid stalls
-            .connectTimeout(1, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
-            .callTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-            // reuse sockets across icons (HTTP/2 pooling)
-            .connectionPool(okhttp3.ConnectionPool(5, 5, java.util.concurrent.TimeUnit.MINUTES))
-            .build()
-    }
+private object SvgBitmapCache {
+    val lru = android.util.LruCache<String, Bitmap>(32)
 }
 
 private const val EXPECTED_ASPECT_GUESS = 16f / 9f
@@ -487,9 +476,11 @@ private fun HeaderIcon(
         s.startsWith("http", ignoreCase = true) || s.startsWith("/")
     }
 
-    var bmp by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    val cacheKey = remember(data, sizePx, currentColorHex) { "$data|$sizePx|$currentColorHex" }
+    var bmp by remember(cacheKey) { mutableStateOf(SvgBitmapCache.lru.get(cacheKey)) }
 
-    LaunchedEffect(data, sizePx, currentColorHex) {
+    LaunchedEffect(cacheKey) {
+        if (bmp != null) return@LaunchedEffect
         bmp = try {
             val s = data.trim()
 
@@ -519,9 +510,11 @@ private fun HeaderIcon(
             if (svgText == null) {
                 null
             } else {
-                // render off main
+                // render off main and store in LruCache
                 withContext(Dispatchers.Default) {
-                    renderSvgToBitmap(svgText, sizePx, currentColorHex)
+                    renderSvgToBitmap(svgText, sizePx, currentColorHex)?.also { rendered ->
+                        SvgBitmapCache.lru.put(cacheKey, rendered)
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -586,7 +579,7 @@ private fun fetchSvgText(ctx: android.content.Context, url: String?, isHa: Boole
     val reqBuilder = okhttp3.Request.Builder().url(url)
     if (!token.isNullOrBlank() && isHa) reqBuilder.header("Authorization", "Bearer $token")
 
-    IconHttp.client.newCall(reqBuilder.build()).execute().use { resp ->
+    SharedHttpClients.mediaFetch.newCall(reqBuilder.build()).execute().use { resp ->
         val ctype = resp.header("Content-Type") ?: ""
         val bodyStr = resp.body?.string()
         if (!resp.isSuccessful) return null

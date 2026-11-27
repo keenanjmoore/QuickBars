@@ -25,9 +25,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.InputStream
@@ -45,6 +45,7 @@ import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import dev.trooped.tvquickbars.R
+import dev.trooped.tvquickbars.utils.SharedHttpClients
 
 /**
  * Composable function to display a camera Picture-in-Picture (PiP) overlay.
@@ -309,10 +310,22 @@ private fun CameraRtspView(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    var showDebug by remember { mutableStateOf(false) }
-    var lastError by remember { mutableStateOf<String?>(null) }
+    var showDebug by remember(url, config) { mutableStateOf(false) }
+    var lastError by remember(url, config) { mutableStateOf<String?>(null) }
+    var retryCount by remember(url, config) { mutableStateOf(0) }
+    var isFirstFrameRendered by remember(url, config) { mutableStateOf(false) }
+    var pendingRetry by remember(url, config) { mutableStateOf(false) }
 
-    val player = remember(url, config) {
+    LaunchedEffect(pendingRetry, retryCount) {
+        if (pendingRetry && retryCount in 1..5) {
+            val backoffMs = (1000L shl minOf(retryCount - 1, 3)).coerceAtMost(8000L)
+            delay(backoffMs)
+            pendingRetry = false
+        }
+    }
+
+    val player = remember(url, config, if (pendingRetry) -1 else retryCount) {
+        if (pendingRetry) return@remember null
         try {
             val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
@@ -334,7 +347,20 @@ private fun CameraRtspView(
                     .setEnableDecoderFallback(true)
             }
 
-            val mediaItem = androidx.media3.common.MediaItem.fromUri(url)
+            val mediaItem = androidx.media3.common.MediaItem.Builder()
+                .setUri(url)
+                .apply {
+                    if (config.latency == StreamLatency.LOW_LATENCY) {
+                        setLiveConfiguration(
+                            androidx.media3.common.MediaItem.LiveConfiguration.Builder()
+                                .setTargetOffsetMs(400)
+                                .setMaxPlaybackSpeed(1.04f)
+                                .build()
+                        )
+                    }
+                }
+                .build()
+
             val mediaSource = if (url.startsWith("rtsp://", ignoreCase = true)) {
                 val rtspFactory = androidx.media3.exoplayer.rtsp.RtspMediaSource.Factory()
                     .setTimeoutMs(4000)
@@ -342,11 +368,10 @@ private fun CameraRtspView(
                 when (config.transport) {
                     TransportProtocol.TCP -> rtspFactory.setForceUseRtpTcp(true)
                     TransportProtocol.UDP -> rtspFactory.setForceUseRtpTcp(false)
-                    TransportProtocol.AUTO -> { /* Let Exo decide */ }
+                    TransportProtocol.AUTO -> rtspFactory.setForceUseRtpTcp(retryCount % 2 == 0)
                 }
                 rtspFactory.createMediaSource(mediaItem)
             } else {
-                // HLS (.m3u8), MP4, or other direct media supported natively
                 androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context)
                     .createMediaSource(mediaItem)
             }
@@ -373,10 +398,22 @@ private fun CameraRtspView(
                     videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
                     addListener(object : androidx.media3.common.Player.Listener {
+                        override fun onRenderedFirstFrame() {
+                            isFirstFrameRendered = true
+                            showDebug = false
+                            lastError = null
+                        }
+
                         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                             val cause = error.cause?.message ?: "Unknown"
                             lastError = "Code: ${error.errorCodeName}\n$cause"
-                            showDebug = true
+                            if (retryCount < 5) {
+                                retryCount += 1
+                                isFirstFrameRendered = false
+                                pendingRetry = true
+                            } else {
+                                showDebug = true
+                            }
                         }
                     })
 
@@ -391,7 +428,7 @@ private fun CameraRtspView(
         }
     }
 
-    Box(modifier = modifier) {
+    Box(modifier = modifier.background(Color.Black)) {
         if (player != null) {
             PlayerSurface(
                 player = player,
@@ -399,8 +436,44 @@ private fun CameraRtspView(
                 modifier = Modifier.fillMaxSize()
             )
 
+            if (isFirstFrameRendered && !showDebug) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF4ADE80))
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "LIVE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+            }
+
             if (showDebug) {
                 DebugInfoOverlay(player = player, errorMessage = lastError)
+            }
+        } else if (pendingRetry) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "Reconnecting ($retryCount/5)…",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White.copy(alpha = 0.85f),
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                )
             }
         } else {
             androidx.compose.material3.Text(
@@ -489,13 +562,7 @@ fun CameraMjpegView(
     modifier: Modifier = Modifier.fillMaxSize()
 ) {
     val tag = "CameraMjpegView"
-    val okHttp = remember {
-        OkHttpClient.Builder()
-            .retryOnConnectionFailure(true)
-            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-            .build()
-    }
+    val okHttp = SharedHttpClients.mjpegStream
 
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -605,14 +672,17 @@ private class FastFrameBuffer(initialCapacity: Int = 256 * 1024) {
 }
 
 /**
- * Optimized non-allocating MJPEG stream reader.
+ * Optimized sliding-window MJPEG stream reader: preserves leftover trailing bytes across reads,
+ * extracts exact SOI..EOI frame slices, and caps emit cadence to protect UI/GC on TV boxes.
  */
 private suspend fun readMjpegLoop(
     input: InputStream,
+    minFrameIntervalMs: Long = 50L,
     onFrame: (ByteArray) -> Unit
 ) {
-    val buf = ByteArray(8 * 1024)
-    val frame = FastFrameBuffer(256 * 1024)
+    val readBuf = ByteArray(16 * 1024)
+    val streamBuf = FastFrameBuffer(256 * 1024)
+    var lastEmitMs = 0L
 
     fun findMarker(bytes: ByteArray, start: Int, end: Int, hi: Int, lo: Int): Int {
         val hiB = hi and 0xFF
@@ -625,39 +695,47 @@ private suspend fun readMjpegLoop(
     }
 
     while (coroutineContext.isActive) {
-        val read = withContext(Dispatchers.IO) { input.read(buf) }
+        val read = withContext(Dispatchers.IO) { input.read(readBuf) }
         if (read <= 0) break
 
-        var offset = 0
-        while (offset < read) {
-            // Find SOI 0xFF 0xD8 directly in read buffer
-            val soi = findMarker(buf, offset, read, 0xFF, 0xD8)
+        streamBuf.write(readBuf, 0, read)
+
+        while (true) {
+            val soi = findMarker(streamBuf.buf, 0, streamBuf.size, 0xFF, 0xD8)
             if (soi == -1) {
-                offset = read
+                streamBuf.reset()
+                break
+            }
+            val eoi = findMarker(streamBuf.buf, soi + 2, streamBuf.size, 0xFF, 0xD9)
+            if (eoi == -1) {
+                // Trim leading noise before SOI if any
+                if (soi > 0) {
+                    val rem = streamBuf.size - soi
+                    System.arraycopy(streamBuf.buf, soi, streamBuf.buf, 0, rem)
+                    streamBuf.reset()
+                    streamBuf.write(streamBuf.buf, 0, rem)
+                }
                 break
             }
 
-            val start = soi
-            frame.reset()
-            val chunkLen = read - start
-            frame.write(buf, start, chunkLen)
-
-            // Search for EOI incrementally without copying
-            var searchStart = 0
-            var eoiIndex = findMarker(frame.buf, searchStart, frame.size, 0xFF, 0xD9)
-
-            while (eoiIndex == -1) {
-                searchStart = maxOf(0, frame.size - 1)
-                val more = withContext(Dispatchers.IO) { input.read(buf) }
-                if (more <= 0) return
-                frame.write(buf, 0, more)
-                eoiIndex = findMarker(frame.buf, searchStart, frame.size, 0xFF, 0xD9)
+            val frameEnd = eoi + 2
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastEmitMs >= minFrameIntervalMs) {
+                val frameBytes = streamBuf.buf.copyOfRange(soi, frameEnd)
+                onFrame(frameBytes)
+                lastEmitMs = now
             }
 
-            // Emit single frame slice
-            onFrame(frame.toByteArray())
-
-            offset = read
+            // Shift trailing bytes to start of streamBuf
+            val remaining = streamBuf.size - frameEnd
+            if (remaining > 0) {
+                val tail = streamBuf.buf.copyOfRange(frameEnd, streamBuf.size)
+                streamBuf.reset()
+                streamBuf.write(tail, 0, tail.size)
+            } else {
+                streamBuf.reset()
+                break
+            }
         }
     }
 }

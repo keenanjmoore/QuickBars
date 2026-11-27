@@ -12,11 +12,14 @@ import dev.trooped.tvquickbars.data.EntityItem
 import dev.trooped.tvquickbars.ha.ws.HaClientBridge
 import dev.trooped.tvquickbars.ha.ws.MessageRouter
 import dev.trooped.tvquickbars.ha.ws.handlers.QuickBarsCloseHandler
+import dev.trooped.tvquickbars.ha.ws.handlers.QuickBarsConfigHandler
 import dev.trooped.tvquickbars.ha.ws.handlers.QuickBarsNotifyHandler
 import dev.trooped.tvquickbars.ha.ws.handlers.QuickBarsOpenHandler
 import dev.trooped.tvquickbars.ha.ws.handlers.StateChangedHandler
+import dev.trooped.tvquickbars.ha.ws.handlers.SubscribeEntitiesHandler
 import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import dev.trooped.tvquickbars.utils.DemoModeManager
+import dev.trooped.tvquickbars.utils.SharedHttpClients
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,13 +27,14 @@ import kotlinx.coroutines.flow.filterNot
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import org.json.JSONArray
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Represents the result of validating Home Assistant credentials.
@@ -70,20 +74,21 @@ class HomeAssistantClient(
     private val url: String,
     private val token: String,
     private val listener: HomeAssistantListener,
-    private val appContext: Context? = null
-)  {
-    private val client = OkHttpClient()
-    private var webSocket: WebSocket? = null
-    private var nextCommandId = 2
+    private val appContext: Context? = null,
+    private val useEntitySubscription: Boolean = false
+) {
+    private val client = SharedHttpClients.webSocket
+    @Volatile private var webSocket: WebSocket? = null
+    private val nextCommandId = AtomicInteger(2)
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+    @Volatile var lastPongElapsedMs: Long = android.os.SystemClock.elapsedRealtime()
+        private set
 
-    val  connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    @Volatile private var latestStatesStr: String? = null
-    fun getLatestStatesJson(): org.json.JSONArray? =
-        latestStatesStr?.let { org.json.JSONArray(it) }
+    fun getLatestStatesJson(): org.json.JSONArray? = null
 
-    private val knownIds = mutableSetOf<String>() // All known entity IDs after the last full get_states
+    private val knownIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private val isInDemoMode: Boolean
         get() = DemoModeManager.isInDemoMode
@@ -91,10 +96,12 @@ class HomeAssistantClient(
     private val messageRouter by lazy {
         MessageRouter(
             listOf(
+                SubscribeEntitiesHandler(),
                 StateChangedHandler(),
                 QuickBarsOpenHandler(),
                 QuickBarsNotifyHandler(),
                 QuickBarsCloseHandler(),
+                QuickBarsConfigHandler(),
             )
         )
     }
@@ -110,7 +117,7 @@ class HomeAssistantClient(
         override fun send(obj: JSONObject): Boolean =
             webSocket?.send(obj.toString()) ?: false
 
-        override fun nextId(): Int = nextCommandId++
+        override fun nextId(): Int = nextCommandId.getAndIncrement()
 
         override fun updateConnectionState(state: ConnectionState) { _connectionState.value = state }
 
@@ -182,8 +189,11 @@ class HomeAssistantClient(
      * Disconnect from the Home Assistant server.
      */
     fun disconnect() {
-        webSocket?.close(1000, "Client Disconnecting")
-        client.dispatcher.executorService.shutdown()
+        val ws = webSocket
+        webSocket = null
+        try {
+            ws?.close(1000, "Client Disconnecting")
+        } catch (_: Throwable) {}
     }
 
     /**
@@ -213,7 +223,7 @@ class HomeAssistantClient(
     fun fireEvent(eventType: String, data: JSONObject): Boolean {
         if (_connectionState.value !is ConnectionState.Connected) return false
         val msg = JSONObject().apply {
-            put("id", nextCommandId++)
+            put("id", nextCommandId.getAndIncrement())
             put("type", "fire_event")
             put("event_type", eventType)
             put("event_data", data)
@@ -438,7 +448,7 @@ class HomeAssistantClient(
             return
         }
 
-        val commandId = nextCommandId++
+        val commandId = nextCommandId.getAndIncrement()
 
         val serviceData = JSONObject().apply {
             // Always include entity_id in service_data for maximum compatibility
@@ -484,7 +494,7 @@ class HomeAssistantClient(
         }
 
         try {
-            val pingId = nextCommandId++
+            val pingId = nextCommandId.getAndIncrement()
             val pingMessage = JSONObject().apply {
                 put("id", pingId)
                 put("type", "ping")
@@ -522,7 +532,9 @@ class HomeAssistantClient(
      */
     inner class HomeAssistantWebSocketListener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            if (webSocket !== this@HomeAssistantClient.webSocket) return
             Log.i(TAG, "WebSocket Connection Opened!")
+            lastPongElapsedMs = android.os.SystemClock.elapsedRealtime()
             val authMessage = JSONObject().apply {
                 put("type", "auth")
                 put("access_token", token)
@@ -531,19 +543,28 @@ class HomeAssistantClient(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            val message = JSONObject(text)
-            when (message.getString("type")) {
+            if (webSocket !== this@HomeAssistantClient.webSocket) return
+            val message = try {
+                JSONObject(text)
+            } catch (e: Exception) {
+                Log.w(TAG, "Malformed WS frame ignored: ${e.message}")
+                return
+            }
+            when (message.optString("type")) {
                 "auth_ok" -> {
+                    lastPongElapsedMs = android.os.SystemClock.elapsedRealtime()
                     _connectionState.value = ConnectionState.Connected
                     val getStatesMessage = JSONObject().apply { put("id", 1); put("type", "get_states") }
                     webSocket.send(getStatesMessage.toString())
                     subscribeToEvents(webSocket)
                 }
                 "auth_invalid" -> _connectionState.value = ConnectionState.Error(ConnectionState.Reason.AUTH_FAILED)
-
+                "pong" -> {
+                    lastPongElapsedMs = android.os.SystemClock.elapsedRealtime()
+                }
                 "result" -> {
-                    val id = message.getInt("id")
-                    val success = message.getBoolean("success")
+                    val id = message.optInt("id", -1)
+                    val success = message.optBoolean("success", false)
                     if (!success) {
                         val err = message.optJSONObject("error")
                         Log.w(TAG, "msg result id=$id success=false error=${err?.toString()}")
@@ -557,36 +578,31 @@ class HomeAssistantClient(
                         if (looksLikeStates) {
                             Log.i(TAG, "Processing get_states result id=$id size=${res.length()}")
                             processEntityData(res)
-                            latestStatesStr = res.toString()
+                            if (useEntitySubscription && this@HomeAssistantClient.webSocket === webSocket) {
+                                subscribeToRelevantEntities(webSocket)
+                            }
                         }
                     }
                 }
 
-                // ↓↓↓ NEW: fully routed event handling ↓↓↓
-                "event" -> messageRouter.handleIncoming(message, bridge)
+                // Routed event handling (including QuickBars events & subscribe_entities)
+                "event" -> {
+                    lastPongElapsedMs = android.os.SystemClock.elapsedRealtime()
+                    messageRouter.handleIncoming(message, bridge)
+                }
             }
         }
 
-        /**
-         * Called when the WebSocket connection is closing.
-         * @param webSocket The WebSocket connection.
-         * @param code The close code.
-         * @param reason The reason for closing.
-         */
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            if (webSocket !== this@HomeAssistantClient.webSocket) return
             Log.w(TAG, "websocket onClosed code=$code reason=$reason")
             if (_connectionState.value !is ConnectionState.Error) {
                 _connectionState.value = ConnectionState.Disconnected
             }
         }
 
-        /**
-         * Called when the WebSocket connection fails.
-         * @param webSocket The WebSocket connection.
-         * @param t The Throwable that caused the failure.
-         * @param response The Response object, if available.
-         */
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (webSocket !== this@HomeAssistantClient.webSocket) return
             Log.e(TAG, "websocket onFailure", t)
             if (response?.code == 401) {
                 _connectionState.value = ConnectionState.Error(ConnectionState.Reason.AUTH_FAILED)
@@ -629,34 +645,67 @@ class HomeAssistantClient(
      * @param webSocket The WebSocket connection to Home Assistant.
      */
     private fun subscribeToEvents(webSocket: WebSocket) {
-        val eventSubscriptionMessage = JSONObject().apply {
-            put("id", nextCommandId++)
-            put("type", "subscribe_events")
-            put("event_type", "state_changed")
+        if (!useEntitySubscription) {
+            val eventSubscriptionMessage = JSONObject().apply {
+                put("id", nextCommandId.getAndIncrement())
+                put("type", "subscribe_events")
+                put("event_type", "state_changed")
+            }
+            webSocket.send(eventSubscriptionMessage.toString())
         }
-        webSocket.send(eventSubscriptionMessage.toString())
 
-        // Subscribe to both naming conventions to be safe
-        val quickbarEventSubscriptionMessage = JSONObject().apply {
-            put("id", nextCommandId++)
-            put("type", "subscribe_events")
-            put("event_type", "quickbars.open") // Original format
+        val quickbarEvents = listOf(
+            "quickbars.open",
+            "quickbars.close",
+            "quickbars.notify",
+            "quickbars.config",
+            "quickbars.ping",
+            EVENT_REQ
+        )
+        for (evType in quickbarEvents) {
+            val msg = JSONObject().apply {
+                put("id", nextCommandId.getAndIncrement())
+                put("type", "subscribe_events")
+                put("event_type", evType)
+            }
+            webSocket.send(msg.toString())
         }
-        webSocket.send(quickbarEventSubscriptionMessage.toString())
+    }
 
-        val cfgReq = JSONObject().apply {
-            put("id", nextCommandId++)
-            put("type", "subscribe_events")
-            put("event_type", EVENT_REQ)
+    /**
+     * Subscribes to compact entity state updates for saved QuickBar entities, cameras,
+     * and QuickBars helper booleans to avoid processing unrelated HA state churn.
+     */
+    private fun subscribeToRelevantEntities(webSocket: WebSocket) {
+        val ids = LinkedHashSet<String>()
+        getContext()?.let { ctx ->
+            SavedEntitiesManager(ctx).loadEntities().forEach { ids += it.id }
         }
-        webSocket.send(cfgReq.toString())
+        for (id in knownIds) {
+            if (id.startsWith("camera.") || id.startsWith("input_boolean.quickbars_")) {
+                ids += id
+            }
+        }
+        if (ids.isEmpty()) {
+            // Fallback to state_changed if user hasn't imported entities or cameras yet
+            val fallback = JSONObject().apply {
+                put("id", nextCommandId.getAndIncrement())
+                put("type", "subscribe_events")
+                put("event_type", "state_changed")
+            }
+            webSocket.send(fallback.toString())
+            return
+        }
 
-        val quickbarsNotifySub = JSONObject().apply {
-            put("id", nextCommandId++)
-            put("type", "subscribe_events")
-            put("event_type", "quickbars.notify")
+        val entityIdsJson = JSONArray()
+        ids.forEach { entityIdsJson.put(it) }
+        val subMsg = JSONObject().apply {
+            put("id", nextCommandId.getAndIncrement())
+            put("type", "subscribe_entities")
+            put("entity_ids", entityIdsJson)
         }
-        webSocket.send(quickbarsNotifySub.toString())
+        webSocket.send(subMsg.toString())
+        Log.i(TAG, "Subscribed via compact subscribe_entities to ${ids.size} relevant entities")
     }
 
     /**

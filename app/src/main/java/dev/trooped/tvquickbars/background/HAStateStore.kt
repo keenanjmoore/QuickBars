@@ -29,7 +29,12 @@ object HAStateStore {
     private val _entitiesById = MutableStateFlow<Map<String, EntityItem>>(emptyMap())
     val entitiesById: StateFlow<Map<String, EntityItem>> = _entitiesById
 
+    private val _activePipIds = MutableStateFlow<List<String>>(emptyList())
+    val activePipIds: StateFlow<List<String>> = _activePipIds
+
     fun setConnection(state: ConnectionState) { _connection.value = state }
+
+    fun setActivePipIds(ids: List<String>) { _activePipIds.value = ids }
 
     fun setCategories(list: List<CategoryItem>) {
         _categories.value = list

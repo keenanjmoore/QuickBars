@@ -19,6 +19,14 @@
 -keep class * implements com.google.gson.JsonDeserializer { *; }
 
 -keep class dev.trooped.tvquickbars.data.** { *; }
+-keep class dev.trooped.tvquickbars.camera.** { *; }
+-keep class dev.trooped.tvquickbars.notification.** { *; }
+-keep class dev.trooped.tvquickbars.ha.ws.** { *; }
+
+# Keep AndroidX DataStore + Tink + Media3 RTSP reflection targets
+-keep class androidx.datastore.** { *; }
+-keep class com.google.crypto.tink.** { *; }
+-keep class androidx.media3.exoplayer.rtsp.** { *; }
 
 # Uncomment this to preserve the line number information for
 # debugging stack traces.

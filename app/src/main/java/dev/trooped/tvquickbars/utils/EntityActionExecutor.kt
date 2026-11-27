@@ -10,6 +10,7 @@ import dev.trooped.tvquickbars.data.PressType
 import dev.trooped.tvquickbars.ha.HomeAssistantClient
 import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 
 
 /**
@@ -39,16 +40,13 @@ object EntityActionExecutor {
      */
     object QuickBarDataCache {
         // Keep track of entities being displayed in the QuickBar
+        @Volatile
         var cachedEntities = listOf<EntityItem>()
 
-        // Map to store the latest state of each entity from events
-        private val latestEntityStates = mutableMapOf<String, String>()
+        // Thread-safe maps for real-time state & attributes accessed from WS and Main threads
+        private val latestEntityStates = ConcurrentHashMap<String, String>()
+        private val latestEntityAttributes = ConcurrentHashMap<String, JSONObject>()
 
-        // Map to store the latest attributes of each entity from events
-        private val latestEntityAttributes = mutableMapOf<String, JSONObject>()
-
-
-        // Update the latest state when we receive state change events
         fun updateEntityState(entityId: String, state: String) {
             latestEntityStates[entityId] = state
         }
@@ -57,14 +55,9 @@ object EntityActionExecutor {
             latestEntityAttributes[entityId] = attributes
         }
 
-        // Get the latest known state
-        fun getLatestEntityState(entityId: String): String? {
-            return latestEntityStates[entityId]
-        }
+        fun getLatestEntityState(entityId: String): String? = latestEntityStates[entityId]
 
-        fun getLatestEntityAttributes(entityId: String): JSONObject? {
-            return latestEntityAttributes[entityId]
-        }
+        fun getLatestEntityAttributes(entityId: String): JSONObject? = latestEntityAttributes[entityId]
     }
 
     private enum class DefaultAct { EXPAND, TOGGLE, PRESS, TURN_ON, NONE, CAMERA_PIP, TRIGGER}

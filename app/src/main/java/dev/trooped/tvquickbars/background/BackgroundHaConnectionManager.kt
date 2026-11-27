@@ -4,9 +4,16 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
+import android.os.Build
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
+import dev.trooped.tvquickbars.BuildConfig
 import dev.trooped.tvquickbars.camera.CameraRequest
+import dev.trooped.tvquickbars.data.AppIdProvider
 import dev.trooped.tvquickbars.ha.*
+import dev.trooped.tvquickbars.ha.ws.TargetMatcher
+import dev.trooped.tvquickbars.persistence.AppPrefs
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.data.CategoryItem
 import dev.trooped.tvquickbars.data.EntityItem
@@ -151,7 +158,7 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             }
 
             try {
-                val c = HomeAssistantClient(url, token, this, appCtx)
+                val c = HomeAssistantClient(url, token, this, appCtx, useEntitySubscription = true)
                 client = c
                 c.connect()
 
@@ -169,13 +176,18 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                         HAStateStore.setConnection(state)
                         backoffSec = 1
 
-                        // Keep the loop parked while connected; when disconnects happen
-                        // HomeAssistantClient will invoke onConnectionClosed() and we continue.
-                        c.connectionState.onEach { s -> HAStateStore.setConnection(s) }
+                        val mirrorJob = c.connectionState
+                            .onEach { s -> HAStateStore.setConnection(s) }
                             .launchIn(scope)
 
-                        // Suspend until disconnected
-                        waitUntilDisconnected(c)
+                        publishTelemetryNow(appCtx, trigger = "connect")
+
+                        // Suspend until genuinely disconnected or zombie detected
+                        try {
+                            waitUntilDisconnected(c, appCtx)
+                        } finally {
+                            mirrorJob.cancel()
+                        }
                     }
                     is ConnectionState.Error -> {
                         Log.d(TAG, "Connection failed: ${state.reason}. Will retry with backoff.")
@@ -200,21 +212,72 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
         }
     }
 
-    private suspend fun waitUntilDisconnected(c: HomeAssistantClient) {
-        withTimeoutOrNull(30 * 60 * 1000L) { // 30-minute maximum session
-            while (running && c.isConnected()) {
-                try {
-                    // Send ping/heartbeat every 5 minutes to detect zombie connections
-                    if (System.currentTimeMillis() % (5 * 60 * 1000) < 1000) {
-                        c.ping()
+    private suspend fun waitUntilDisconnected(c: HomeAssistantClient, appCtx: Context) {
+        var lastPingElapsed = SystemClock.elapsedRealtime()
+        var lastTelemetryElapsed = SystemClock.elapsedRealtime()
+        val pingIntervalMs = 5 * 60 * 1000L
+
+        while (running && c.isConnected()) {
+            try {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastPingElapsed >= pingIntervalMs) {
+                    if (!c.ping()) {
+                        Log.w(TAG, "Ping send failed, breaking connection loop")
+                        break
                     }
-                    delay(1000)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error in connection monitoring", e)
+                    lastPingElapsed = now
+                }
+                // Check zombie connection (>6 minutes without any HA frame/pong after ping)
+                if (now - c.lastPongElapsedMs > 6 * 60 * 1000L) {
+                    Log.w(TAG, "No WS activity/pong for >6 minutes; reconnecting")
                     break
                 }
+
+                val telemetryMs = AppPrefs.getTelemetryIntervalSec(appCtx) * 1000L
+                if (now - lastTelemetryElapsed >= telemetryMs) {
+                    publishTelemetryNow(appCtx, trigger = "heartbeat")
+                    lastTelemetryElapsed = now
+                }
+                delay(2000)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in connection monitoring", e)
+                break
             }
         }
+    }
+
+    fun publishTelemetryNow(ctx: Context, trigger: String = "heartbeat") {
+        val c = client ?: return
+        if (!c.isConnected()) return
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val displayOn = pm?.isInteractive ?: true
+        val activePips = HAStateStore.activePipIds.value
+        val activeArr = org.json.JSONArray()
+        activePips.forEach { activeArr.put(it) }
+
+        val payload = JSONObject().apply {
+            put("app_id", AppIdProvider.get(ctx))
+            put("device_name", TargetMatcher.getDeviceName(ctx))
+            put("device_slug", TargetMatcher.getDeviceSlug(ctx))
+            put("model", Build.MODEL ?: "")
+            put("sdk", Build.VERSION.SDK_INT)
+            put("version", BuildConfig.VERSION_NAME)
+            put("version_code", BuildConfig.VERSION_CODE)
+            put("status", "online")
+            put("trigger", trigger)
+            put("dnd", AppPrefs.isDndEnabled(ctx))
+            put("quiet_hours", AppPrefs.isCurrentlyInQuietHours(ctx))
+            put("quiet_hours_enabled", AppPrefs.isQuietHoursEnabled(ctx))
+            put("auto_dock", AppPrefs.isAutoDockEnabled(ctx))
+            put("default_auto_hide", AppPrefs.getDefaultCameraAutoHideSeconds(ctx))
+            put("pip_max_slots", AppPrefs.getPipMaxSlots(ctx))
+            put("rtsp_latency", AppPrefs.getRtspLatencyMode(ctx) ?: "auto")
+            put("display_on", displayOn)
+            put("active_pip_count", activePips.size)
+            put("active_cameras", activeArr)
+            put("uptime_sec", SystemClock.elapsedRealtime() / 1000L)
+        }
+        c.fireEvent("quickbars.telemetry", payload)
     }
 
     private suspend fun delayWithBackoff() {
