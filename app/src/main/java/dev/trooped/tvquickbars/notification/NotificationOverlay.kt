@@ -291,20 +291,6 @@ fun NotificationOverlay(
 }
 
 
-private object HaHttp {
-    val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-            .callTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
-            .build()
-    }
-}
-
-/**
- * Fetch the first JPEG part from HA's MJPEG stream and return its bytes.
- * Throws on protocol/timeouts. Keep timeouts small so UI stays snappy.
- */
 @Throws(Exception::class)
 private suspend fun fetchFirstMjpegFrameBytes(
     haBase: String,
@@ -319,7 +305,7 @@ private suspend fun fetchFirstMjpegFrameBytes(
         .header("Accept", "multipart/x-mixed-replace")
         .build()
 
-    HaHttp.client.newCall(req).execute().use { resp ->
+    SharedHttpClients.mediaFetch.newCall(req).execute().use { resp ->
         if (!resp.isSuccessful) error("Stream HTTP ${resp.code}")
         val ct = resp.header("Content-Type") ?: error("No Content-Type")
         val boundaryToken = ct.substringAfter("boundary=", "").trim().trim('"')
