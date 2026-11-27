@@ -1812,6 +1812,11 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         if (::camera.isInitialized) camera.hideAutoCloseOverlays()
     }
 
+    @MainThread
+    fun updateActivePipOpacity(opacity: Float) {
+        if (::camera.isInitialized) camera.updateActiveOpacity(opacity)
+    }
+
     fun handleCameraRequest(req: CameraRequest) {
         camera.handleRequest(req)
     }

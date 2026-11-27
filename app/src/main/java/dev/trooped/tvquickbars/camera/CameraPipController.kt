@@ -57,6 +57,7 @@ class CameraPipController(
         val slotKey: String,
         val spec: CameraPipSpec,
         val view: ComposeView,
+        val layoutParams: WindowManager.LayoutParams,
         val lifecycleOwner: ComposeViewLifecycleOwner,
         val hideHandler: Handler,
         val hideRunnable: Runnable,
@@ -241,14 +242,22 @@ class CameraPipController(
     }
 
     private fun showSingleSpec(baseSpec: CameraPipSpec, req: CameraRequest) {
-        // Resolve target slot key
-        val targetSlot = req.slot ?: mapCornerOverride(req.position) ?: allocateAvailableSlot(baseSpec.cornerPosition)
-        val corner = mapCornerOverride(targetSlot) ?: baseSpec.cornerPosition
+        val existingSlot = activeOverlays.entries.firstOrNull {
+            it.value.spec.entityId == baseSpec.entityId
+        }?.key
+        val preferredCorner = mapCornerOverride(req.position) ?: baseSpec.cornerPosition
+        val targetSlot = when {
+            existingSlot != null -> existingSlot
+            !req.slot.isNullOrBlank() -> req.slot
+            req.allowMultiple -> allocateAvailableSlot(preferredCorner)
+            else -> preferredCorner
+        }
+        val corner = mapCornerOverride(targetSlot) ?: preferredCorner
 
         // Auto-mute secondary streams if another overlay is already active, unless user explicitly unmuted
         val shouldMute = if (req.muteAudio != null) {
             req.muteAudio
-        } else if (activeOverlays.isNotEmpty()) {
+        } else if (activeOverlays.isNotEmpty() && existingSlot == null) {
             true
         } else {
             baseSpec.rtspProfile.muteAudio
@@ -270,6 +279,7 @@ class CameraPipController(
         if (!activeOverlays.containsKey(targetSlot) && showToastOnToggle) {
             showToast("${finalSpec.title} → PIP")
         }
+        Log.i(TAG, "OPEN_PIP slot=$targetSlot corner=$corner entity=${finalSpec.entityId} alpha=${finalSpec.opacity} activeCount=${activeOverlays.size + if (existingSlot == null && !activeOverlays.containsKey(targetSlot)) 1 else 0}")
         show(finalSpec, onRetrigger = onRetrigger)
     }
 
@@ -278,7 +288,7 @@ class CameraPipController(
         if (!activeOverlays.containsKey(preferredCorner)) {
             return preferredCorner
         }
-        val slots = listOf("TOP_LEFT", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT")
+        val slots = listOf("TOP_RIGHT", "TOP_LEFT", "BOTTOM_RIGHT", "BOTTOM_LEFT")
         return slots.firstOrNull { !activeOverlays.containsKey(it) } ?: preferredCorner
     }
 
@@ -418,6 +428,7 @@ class CameraPipController(
                 slotKey = slotKey,
                 spec = spec,
                 view = view,
+                layoutParams = params,
                 lifecycleOwner = lifecycleOwner,
                 hideHandler = hideHandler,
                 hideRunnable = hideRunnable,
@@ -476,6 +487,24 @@ class CameraPipController(
         if (matchKey != null) {
             teardownOverlay(matchKey)
         }
+    }
+
+    /** Updates window alpha immediately across any currently displayed PiP overlays. */
+    @MainThread
+    fun updateActiveOpacity(opacity: Float): Unit = runOnMain {
+        val normalized = if (opacity > 1.0f) opacity / 100.0f else opacity
+        val clamped = normalized.coerceIn(0.25f, 1.0f)
+        for ((slotKey, instance) in activeOverlays) {
+            try {
+                instance.layoutParams.alpha = clamped
+                if (instance.view.isAttachedToWindow) {
+                    windowManager.updateViewLayout(instance.view, instance.layoutParams)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "updateActiveOpacity failed for $slotKey: ${t.message}")
+            }
+        }
+        Log.i(TAG, "LIVE_OPACITY alpha=$clamped slots=${activeOverlays.size}")
     }
 
     /** Closes all active camera overlays that allow sleep auto-close. */
@@ -629,11 +658,13 @@ class CameraPipController(
         val fullscreen = req.size.equals("fullscreen", ignoreCase = true) ||
             req.layout.equals("fullscreen", ignoreCase = true) ||
             base.isFullscreen
+        val rawOpacity = req.opacity ?: AppPrefs.getDefaultPipOpacity(context)
+        val normOpacity = (if (rawOpacity > 1.0f) rawOpacity / 100.0f else rawOpacity).coerceIn(0.25f, 1.0f)
         return base.copy(
             borderColorHex = borderColor,
             borderWidthDp = resolvedBorderWidth,
             cornerRadiusDp = (req.cornerRadiusDp ?: base.cornerRadiusDp).coerceIn(0, 24),
-            opacity = (req.opacity ?: base.opacity).coerceIn(0.25f, 1.0f),
+            opacity = normOpacity,
             marginDp = (req.marginDp ?: base.marginDp).coerceIn(0, 64),
             showLiveBadge = req.showLiveBadge ?: base.showLiveBadge,
             showTimestamp = req.showTimestamp ?: base.showTimestamp,

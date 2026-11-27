@@ -87,6 +87,12 @@ blueprint:
           default: true
           selector:
             boolean: {}
+        quad_mosaic_stream:
+          name: go2rtc Quad View Stream Name
+          description: Stream path in go2rtc.yaml used by Auto Quad View when multiple cameras trigger together.
+          default: "quad_mosaic"
+          selector:
+            text: {}
 
     # ── 3. Smart TV Fleet Targeting ────────────────────────────────────────────
     tv_fleet_section:
@@ -195,13 +201,27 @@ blueprint:
               max: 24
               unit_of_measurement: dp
         pip_opacity:
-          name: Window Opacity
+          name: Window Opacity (Fallback)
           default: 0.95
           selector:
             number:
-              min: 0.3
+              min: 0.25
               max: 1.0
               step: 0.05
+        pip_opacity_helper:
+          name: Live PiP Opacity Slider Helper (Optional)
+          description: Percent helper (25-100%) synced live to active TV PiPs when moved.
+          default: input_number.quickbars_pip_opacity
+          selector:
+            entity:
+              domain: input_number
+        multi_camera_mode_helper:
+          name: Multi-Camera Behavior Helper (Optional)
+          description: Controls whether multiple simultaneous cameras open in separate corners or switch to Quad View.
+          default: input_select.quickbars_multi_camera_mode
+          selector:
+            entity:
+              domain: input_select
         margin_dp:
           name: Screen Edge Margin (dp)
           default: 20
@@ -400,12 +420,19 @@ blueprint:
           selector:
             boolean: {}
         helper_sync_entities:
-          name: Helper Entities to Watch for Sync
+          name: Boolean Helpers to Watch for Sync
           default: []
           selector:
             entity:
               multiple: true
               domain: input_boolean
+        opacity_sync_entities:
+          name: Number Helpers (Opacity) to Watch for Sync
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: input_number
         cinema_dnd_helper:
           name: Cinema DND Helper
           default: input_boolean.quickbars_cinema_dnd
@@ -560,6 +587,9 @@ triggers:
     entity_id: !input helper_sync_entities
     id: helper_sync
   - trigger: state
+    entity_id: !input opacity_sync_entities
+    id: helper_sync
+  - trigger: state
     entity_id: !input cinema_media_players
     to: "playing"
     for:
@@ -603,6 +633,7 @@ actions:
       cam_map: !input trigger_camera_map
       fallback_cam: !input fallback_camera_entity
       use_snapshot_first: !input enable_snapshot_first
+      quad_stream: !input quad_mosaic_stream
       awake_only_flag: !input awake_only
       fleet: !input tv_fleet
       excluded_ids: !input excluded_app_ids
@@ -613,6 +644,16 @@ actions:
       border_w: !input border_width_dp
       corner_r: !input corner_radius_dp
       win_opacity: !input pip_opacity
+      opacity_helper: !input pip_opacity_helper
+      multi_mode_helper: !input multi_camera_mode_helper
+      eff_opacity: >
+        {% set raw = states(opacity_helper) %}
+        {% if is_number(raw) %}
+          {% set v = raw | float %}
+          {{ ([([ (v / 100.0 if v > 1.0 else v), 1.0 ] | min), 0.25] | max) | round(2) }}
+        {% else %}
+          {{ ([([ (win_opacity | float), 1.0 ] | min), 0.25] | max) | round(2) }}
+        {% endif %}
       edge_margin: !input margin_dp
       show_live_flag: !input show_live_badge
       show_ts_flag: !input show_timestamp
@@ -682,16 +723,27 @@ actions:
               selected_title: "{{ entry.get('title', state_attr(trig_ent, 'friendly_name') | default('Camera')) }}"
               base_corner: "{{ entry.get('default_corner', 'top_right') }}"
               is_chime: "{{ ('chime' in trig_ent) or ('visitor' in trig_ent) }}"
-              resolved_corner: >
-                {%- set ns = namespace(occupied=[], chosen=base_corner) -%}
+              multi_mode: "{{ states(multi_mode_helper) | default('Separate Corners', true) }}"
+              allow_multi_flag: "{{ multi_mode != 'Single Corner Replace' }}"
+              other_occupied: >
+                {%- set ns = namespace(corners=[]) -%}
                 {%- for entity, info in cam_map.items() if entity != trig_ent -%}
-                  {%- set s = states[entity] -%}
-                  {%- if s and (s.state == 'on' or entity.startswith('event.')) and (as_timestamp(now()) - as_timestamp(s.last_changed) < 20) -%}
-                    {%- set ns.occupied = ns.occupied + [info.get('default_corner', 'top_right')] -%}
+                  {%- set same_feed = (selected_cam | length > 0 and info.get('camera', '') == selected_cam)
+                                      or (selected_rtsp | length > 0 and info.get('rtsp', '') == selected_rtsp) -%}
+                  {%- if not same_feed -%}
+                    {%- set s = states[entity] -%}
+                    {%- if s and ((s.state == 'on') or (as_timestamp(now()) - as_timestamp(s.last_changed, 0) < (motion_hide | int))) -%}
+                      {%- set ns.corners = ns.corners + [info.get('default_corner', 'top_right')] -%}
+                    {%- endif -%}
                   {%- endif -%}
                 {%- endfor -%}
-                {%- if base_corner in ns.occupied -%}
-                  {%- for c in ['top_right', 'top_left', 'bottom_right', 'bottom_left'] if c not in ns.occupied and ns.chosen == base_corner -%}
+                {{ ns.corners }}
+              use_auto_quad: "{{ (multi_mode == 'Auto Quad View') and ((other_occupied | length) > 0) and (quad_stream | string | trim | length > 0) }}"
+              resolved_corner: >
+                {%- set occ = other_occupied if other_occupied is iterable else [] -%}
+                {%- set ns = namespace(chosen=base_corner) -%}
+                {%- if allow_multi_flag and (base_corner in occ) -%}
+                  {%- for c in ['top_right', 'top_left', 'bottom_right', 'bottom_left'] if (c not in occ) and (ns.chosen == base_corner) -%}
                     {%- set ns.chosen = c -%}
                   {%- endfor -%}
                 {%- endif -%}
@@ -719,6 +771,39 @@ actions:
           - choose:
               - conditions:
                   - condition: template
+                    value_template: "{{ use_auto_quad }}"
+                sequence:
+                  - event: quickbars.open
+                    event_data:
+                      target_ids: "{{ target_app_ids }}"
+                      rtsp_url: "rtsp://{{ go2rtc_host }}/{{ quad_stream }}"
+                      position: top_right
+                      slot: "TOP_RIGHT"
+                      size: large
+                      aspect_ratio: !input aspect_ratio
+                      auto_hide: "{{ [eff_auto_hide | int, 45] | max }}"
+                      show_title: !input show_title
+                      camera_title: "Security Quad View"
+                      show_live_badge: "{{ show_live_flag }}"
+                      show_timestamp: "{{ show_ts_flag }}"
+                      show_countdown_bar: "{{ show_bar_flag }}"
+                      border_color: "{{ eff_border }}"
+                      border_width_dp: "{{ border_w | int }}"
+                      corner_radius_dp: "{{ corner_r | int }}"
+                      opacity: "{{ eff_opacity | float }}"
+                      margin_dp: "{{ edge_margin | int }}"
+                      show_toast: "{{ show_toast_flag }}"
+                      allow_multiple: false
+                      mute_audio: true
+                      rtsp_transport: !input rtsp_transport
+                      rtsp_latency: !input rtsp_latency
+                      software_decoder: !input software_decoder
+                      on_retrigger: extend
+                      auto_close_on_sleep: !input auto_close_on_sleep
+                      priority: "{{ eff_prio }}"
+                      speak_text: "{{ eff_speak }}"
+              - conditions:
+                  - condition: template
                     value_template: "{{ selected_rtsp | length > 0 }}"
                 sequence:
                   - event: quickbars.open
@@ -738,9 +823,10 @@ actions:
                       border_color: "{{ eff_border }}"
                       border_width_dp: "{{ border_w | int }}"
                       corner_radius_dp: "{{ corner_r | int }}"
-                      opacity: "{{ win_opacity | float }}"
+                      opacity: "{{ eff_opacity | float }}"
                       margin_dp: "{{ edge_margin | int }}"
                       show_toast: "{{ show_toast_flag }}"
+                      allow_multiple: "{{ allow_multi_flag }}"
                       mute_audio: "{{ eff_mute }}"
                       rtsp_transport: !input rtsp_transport
                       rtsp_latency: !input rtsp_latency
@@ -769,9 +855,10 @@ actions:
                       border_color: "{{ eff_border }}"
                       border_width_dp: "{{ border_w | int }}"
                       corner_radius_dp: "{{ corner_r | int }}"
-                      opacity: "{{ win_opacity | float }}"
+                      opacity: "{{ eff_opacity | float }}"
                       margin_dp: "{{ edge_margin | int }}"
                       show_toast: "{{ show_toast_flag }}"
+                      allow_multiple: "{{ allow_multi_flag }}"
                       mute_audio: "{{ eff_mute }}"
                       on_retrigger: !input on_retrigger
                       auto_close_on_sleep: !input auto_close_on_sleep
@@ -828,6 +915,7 @@ actions:
                           border_color: "{{ eff_border }}"
                           border_width_dp: "{{ border_w | int }}"
                           corner_radius_dp: "{{ corner_r | int }}"
+                          opacity: "{{ eff_opacity | float }}"
                           show_live_badge: "{{ show_live_flag }}"
                           show_countdown_bar: "{{ show_bar_flag }}"
                           auto_hide: 30
@@ -850,6 +938,7 @@ actions:
                           border_color: "{{ eff_border }}"
                           border_width_dp: "{{ border_w | int }}"
                           corner_radius_dp: "{{ corner_r | int }}"
+                          opacity: "{{ eff_opacity | float }}"
                           show_live_badge: "{{ show_live_flag }}"
                           show_countdown_bar: "{{ show_bar_flag }}"
                           auto_hide: 30
@@ -872,6 +961,7 @@ actions:
             event_data:
               dnd: "{{ is_state(dnd_helper, 'on') }}"
               auto_dock: "{{ is_state(dock_helper, 'on') }}"
+              default_opacity: "{{ eff_opacity | float }}"
           - event: quickbars.config
             event_data:
               target_ids: "{{ qh_targets }}"

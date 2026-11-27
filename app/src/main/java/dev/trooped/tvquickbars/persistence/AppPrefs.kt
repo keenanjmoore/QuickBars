@@ -29,6 +29,7 @@ object AppPrefs {
     private const val KEY_TELEMETRY_INTERVAL_SEC = "pref_telemetry_interval_sec"
     private const val KEY_RT_LATENCY_MODE = "pref_rtsp_latency_mode"
     private const val KEY_HA_DEVICE_ALIAS = "pref_ha_device_alias"
+    private const val KEY_DEFAULT_PIP_OPACITY = "pref_default_pip_opacity"
 
     @Volatile private var cachedVersionCode: Int? = null
 
@@ -199,6 +200,16 @@ object AppPrefs {
     fun setHaDeviceAlias(ctx: Context, alias: String?) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
             if (alias.isNullOrBlank()) remove(KEY_HA_DEVICE_ALIAS) else putString(KEY_HA_DEVICE_ALIAS, alias.trim())
+        }
+    }
+
+    fun getDefaultPipOpacity(ctx: Context): Float =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getFloat(KEY_DEFAULT_PIP_OPACITY, 0.95f).coerceIn(0.25f, 1.0f)
+
+    fun setDefaultPipOpacity(ctx: Context, opacity: Float) {
+        val clamped = opacity.coerceIn(0.25f, 1.0f)
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
+            putFloat(KEY_DEFAULT_PIP_OPACITY, clamped)
         }
     }
 

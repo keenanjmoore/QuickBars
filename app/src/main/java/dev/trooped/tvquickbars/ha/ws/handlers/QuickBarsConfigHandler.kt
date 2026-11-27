@@ -86,6 +86,17 @@ class QuickBarsConfigHandler : WsHandler {
             AppPrefs.setHaDeviceAlias(context, alias.takeIf { it.isNotEmpty() })
             changed = true
         }
+        val rawOpacity = when {
+            data.has("default_opacity") -> data.optDouble("default_opacity", Double.NaN)
+            data.has("opacity") -> data.optDouble("opacity", Double.NaN)
+            else -> Double.NaN
+        }
+        if (!rawOpacity.isNaN()) {
+            val norm = (if (rawOpacity > 1.0) rawOpacity / 100.0 else rawOpacity).coerceIn(0.25, 1.0).toFloat()
+            AppPrefs.setDefaultPipOpacity(context, norm)
+            BackgroundHaConnectionManager.applyLiveOpacityToActivePips(norm)
+            changed = true
+        }
 
         if (changed) {
             Log.i(TAG, "Applied remote config update from HA: $data")

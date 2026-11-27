@@ -291,6 +291,7 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             put("auto_dock", AppPrefs.isAutoDockEnabled(ctx))
             put("default_auto_hide", AppPrefs.getDefaultCameraAutoHideSeconds(ctx))
             put("pip_max_slots", AppPrefs.getPipMaxSlots(ctx))
+            put("default_opacity", AppPrefs.getDefaultPipOpacity(ctx).toDouble())
             put("rtsp_latency", AppPrefs.getRtspLatencyMode(ctx) ?: "auto")
             put("display_on", displayOn)
             put("active_pip_count", activePips.size)
@@ -390,6 +391,13 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             }
         }
         publishTelemetryNow(ctx, trigger = if (isScreenOff) "screen_off" else "screen_on")
+    }
+
+    fun applyLiveOpacityToActivePips(opacity: Float) {
+        mainHandler.post {
+            QuickBarService.serviceInstance?.updateActivePipOpacity(opacity)
+            fallbackCamera?.updateActiveOpacity(opacity)
+        }
     }
 
     @MainThread

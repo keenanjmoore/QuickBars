@@ -131,7 +131,10 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             borderColor = obj.optString("border_color", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             borderWidthDp = if (obj.has("border_width_dp") && !obj.isNull("border_width_dp")) obj.optInt("border_width_dp") else null,
             cornerRadiusDp = if (obj.has("corner_radius_dp") && !obj.isNull("corner_radius_dp")) obj.optInt("corner_radius_dp") else null,
-            opacity = if (obj.has("opacity") && !obj.isNull("opacity")) obj.optDouble("opacity").toFloat() else null,
+            opacity = if (obj.has("opacity") && !obj.isNull("opacity")) {
+                val raw = obj.optDouble("opacity", Double.NaN)
+                if (raw.isNaN()) null else (if (raw > 1.0) raw / 100.0 else raw).coerceIn(0.25, 1.0).toFloat()
+            } else null,
             marginDp = if (obj.has("margin_dp") && !obj.isNull("margin_dp")) obj.optInt("margin_dp") else null,
             showLiveBadge = if (obj.has("show_live_badge") && !obj.isNull("show_live_badge")) obj.optBoolean("show_live_badge") else null,
             showTimestamp = if (obj.has("show_timestamp") && !obj.isNull("show_timestamp")) obj.optBoolean("show_timestamp") else null,
