@@ -750,7 +750,7 @@ private fun CameraRtspView(
 
             val mediaSource = if (url.startsWith("rtsp://", ignoreCase = true)) {
                 val rtspFactory = androidx.media3.exoplayer.rtsp.RtspMediaSource.Factory()
-                    .setTimeoutMs(6000)
+                    .setTimeoutMs(15000)
 
                 when (config.transport) {
                     TransportProtocol.TCP -> rtspFactory.setForceUseRtpTcp(true)
