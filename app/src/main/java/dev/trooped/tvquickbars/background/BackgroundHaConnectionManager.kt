@@ -5,14 +5,21 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.WindowManager
+import android.widget.Toast
+import androidx.annotation.MainThread
 import dev.trooped.tvquickbars.BuildConfig
+import dev.trooped.tvquickbars.camera.CameraPipController
 import dev.trooped.tvquickbars.camera.CameraRequest
 import dev.trooped.tvquickbars.data.AppIdProvider
 import dev.trooped.tvquickbars.ha.*
 import dev.trooped.tvquickbars.ha.ws.TargetMatcher
+import dev.trooped.tvquickbars.notification.NotificationController
 import dev.trooped.tvquickbars.persistence.AppPrefs
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.data.CategoryItem
@@ -70,6 +77,10 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
     private var lastSuccessfulConnectionTime = 0L
 
     private var cleanupJob: Job? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var appCtxRef: Context? = null
+    private var fallbackCamera: CameraPipController? = null
+    private var fallbackNotifications: NotificationController? = null
 
     /**
      * Returns the timestamp of the last successful connection in milliseconds since epoch.
@@ -96,6 +107,7 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
     fun getClient(): HomeAssistantClient? = client
 
     fun start(context: Context) {
+        appCtxRef = context.applicationContext
         Log.d(TAG, "Starting background connection manager. Already running: $running")
         if (running) return
         running = true
@@ -132,6 +144,12 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
         scope.coroutineContext.cancelChildren()
         client?.disconnect()
         client = null
+        mainHandler.post {
+            try { fallbackCamera?.destroy() } catch (_: Throwable) {}
+            fallbackCamera = null
+            try { fallbackNotifications?.onDestroy() } catch (_: Throwable) {}
+            fallbackNotifications = null
+        }
         HAStateStore.setConnection(ConnectionState.Disconnected)
     }
 
@@ -275,6 +293,7 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             put("display_on", displayOn)
             put("active_pip_count", activePips.size)
             put("active_cameras", activeArr)
+            put("a11y_bound", QuickBarService.serviceInstance != null)
             put("uptime_sec", SystemClock.elapsedRealtime() / 1000L)
         }
         c.fireEvent("quickbars.telemetry", payload)
@@ -360,17 +379,71 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
         } ?: Log.w("BgHaConn", "Service not running; camera alias ignored: $cameraAlias")
     }
 
+    @MainThread
+    private fun getOrCreateFallbackCamera(ctx: Context): CameraPipController {
+        fallbackCamera?.let { return it }
+        val appCtx = ctx.applicationContext
+        val wm = appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        return CameraPipController(
+            context = appCtx,
+            windowManager = wm,
+            runOnMain = { r -> if (Looper.myLooper() == Looper.getMainLooper()) r() else mainHandler.post(r) },
+            showToast = { msg -> Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show() }
+        ).also { fallbackCamera = it }
+    }
+
+    @MainThread
+    private fun getOrCreateFallbackNotifications(ctx: Context): NotificationController {
+        fallbackNotifications?.let { return it }
+        val appCtx = ctx.applicationContext
+        val wm = appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        return NotificationController(
+            context = appCtx,
+            windowManager = wm,
+            runOnMain = { r -> if (Looper.myLooper() == Looper.getMainLooper()) r() else mainHandler.post(r) },
+            serviceScope = scope
+        ).also {
+            it.onServiceConnected()
+            fallbackNotifications = it
+        }
+    }
+
     override fun onNotifyReceived(spec: NotificationSpec) {
         Log.i(TAG, "onPromptNotifyReceived: $spec")
-        // Single hand-off point to the UI/service layer
-        QuickBarService.handleNotificationFromHa(spec)
+        val svc = QuickBarService.serviceInstance
+        if (svc != null) {
+            QuickBarService.handleNotificationFromHa(spec)
+        } else {
+            val ctx = appCtxRef ?: client?.getContext()
+            if (ctx != null) {
+                mainHandler.post {
+                    Log.i(TAG, "Using fallback NotificationController (QuickBarService unbound)")
+                    getOrCreateFallbackNotifications(ctx).enqueue(spec)
+                }
+            } else {
+                Log.w(TAG, "No context available; notification ignored: $spec")
+            }
+        }
     }
 
     override fun onCameraRequest(req: CameraRequest) {
-        // Bounce to the running service (main thread) like notify does
-        QuickBarService.serviceInstance?.runOnMain {
-            QuickBarService.serviceInstance?.handleCameraRequest(req)
-        } ?: Log.w("BgHaConn", "Service not running; camera request ignored: $req")
+        val svc = QuickBarService.serviceInstance
+        if (svc != null) {
+            svc.runOnMain {
+                fallbackCamera?.hideAll()
+                svc.handleCameraRequest(req)
+            }
+        } else {
+            val ctx = appCtxRef ?: client?.getContext()
+            if (ctx != null) {
+                mainHandler.post {
+                    Log.i(TAG, "Using fallback CameraPipController (QuickBarService unbound)")
+                    getOrCreateFallbackCamera(ctx).handleRequest(req)
+                }
+            } else {
+                Log.w(TAG, "No context available; camera request ignored: $req")
+            }
+        }
     }
 
     /**

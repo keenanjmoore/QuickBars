@@ -124,13 +124,14 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- Start service at boot if the setting is enabled -->
+        <!-- Start service at boot or after app upgrade if persistent connection / credentials exist -->
         <receiver
             android:name=".receivers.BootCompletedReceiver"
-            android:enabled="false"
+            android:enabled="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
