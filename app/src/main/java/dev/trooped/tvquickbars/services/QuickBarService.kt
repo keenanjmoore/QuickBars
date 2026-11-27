@@ -505,6 +505,30 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         )
 
         failsafeKeyHoldEnabled = isTriggerKeysEnabled()
+
+        if (dev.trooped.tvquickbars.persistence.AppPrefs.isPersistentConnectionEnabled(this)) {
+            serviceScope.launch(Dispatchers.IO) {
+                try {
+                    dev.trooped.tvquickbars.utils.SecureStore.migrateFromOldPrefsIfNeeded(applicationContext)
+                    val url = SecurePrefsManager.getHAUrl(applicationContext)
+                    val token = SecurePrefsManager.getHAToken(applicationContext)
+                    if (!url.isNullOrBlank() && !token.isNullOrBlank()) {
+                        dev.trooped.tvquickbars.persistence.AppPrefs.setBootReceiverEnabled(applicationContext, true)
+                        try {
+                            val svc = Intent(applicationContext, HAConnectionService::class.java)
+                            ContextCompat.startForegroundService(applicationContext, svc)
+                        } catch (fgsErr: Throwable) {
+                            Log.w("QuickBarService", "FGS start fallback to direct BackgroundHaConnectionManager: ${fgsErr.message}")
+                            if (!BackgroundHaConnectionManager.isRunning()) {
+                                BackgroundHaConnectionManager.start(applicationContext)
+                            }
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.e("QuickBarService", "Failed auto-starting persistent HA connection", e)
+                }
+            }
+        }
     }
 
 

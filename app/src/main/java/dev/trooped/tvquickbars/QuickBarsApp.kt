@@ -43,11 +43,20 @@ class QuickBarsApp : Application(), Application.ActivityLifecycleCallbacks {
         AppPrefs.ensureShowToastOnEntityTriggerDefault(this)
 
         appScope.launch {
+            try {
+                SecureStore.migrateFromOldPrefsIfNeeded(this@QuickBarsApp)
+            } catch (e: Exception) {
+                android.util.Log.e("QuickBarsApp", "Credential migration failed", e)
+            }
+
             // warm up keystore + cache token once
             SecureStore.getHAToken(this@QuickBarsApp)
 
             // Run demo mode check in background
             DemoModeManager.checkAndEnableDemoMode(this@QuickBarsApp)
+        }
+        if (AppPrefs.isPersistentConnectionEnabled(this)) {
+            AppPrefs.setBootReceiverEnabled(this, true)
         }
         registerActivityLifecycleCallbacks(this)
 

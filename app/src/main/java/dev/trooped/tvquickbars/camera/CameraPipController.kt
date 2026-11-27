@@ -558,6 +558,17 @@ class CameraPipController(
             else -> null
         }
 
+        if (e == null && !cameraEntityId.isNullOrBlank() && cameraEntityId.trim().startsWith("camera.", ignoreCase = true)) {
+            val trimmedId = cameraEntityId.trim()
+            val fromStore = dev.trooped.tvquickbars.background.HAStateStore.entitiesById.value[trimmedId]
+            return fromStore ?: EntityItem(
+                id = trimmedId,
+                friendlyName = trimmedId.substringAfter("camera.").replace('_', ' ').replaceFirstChar { it.uppercase() },
+                isSaved = false,
+                isAvailable = true
+            )
+        }
+
         if (e == null) {
             Toast.makeText(context, "Camera not found: ${cameraEntityId ?: aliasOrName ?: "(none)"}", Toast.LENGTH_SHORT).show()
             return null
@@ -639,7 +650,7 @@ class CameraPipController(
         )
     }
 
-    private fun mapCornerOverride(pos: String?): String? = when (pos?.lowercase()) {
+    private fun mapCornerOverride(pos: String?): String? = when (pos?.trim()?.lowercase()) {
         null, ""       -> null
         "top_left"     -> "TOP_LEFT"
         "top_right"    -> "TOP_RIGHT"
