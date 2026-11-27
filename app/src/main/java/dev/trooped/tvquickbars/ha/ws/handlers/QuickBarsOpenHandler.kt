@@ -2,6 +2,7 @@ package dev.trooped.tvquickbars.ha.ws.handlers
 
 import android.util.Log
 import dev.trooped.tvquickbars.camera.CameraRequest
+import dev.trooped.tvquickbars.camera.PipAction
 import dev.trooped.tvquickbars.ha.ws.HaClientBridge
 import dev.trooped.tvquickbars.ha.ws.TargetMatcher
 import org.json.JSONObject
@@ -102,6 +103,18 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
 
         val sizePx = obj.optJSONObject("size_px")
 
+        val parsedActions = mutableListOf<PipAction>()
+        obj.optJSONArray("actions")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val aObj = arr.optJSONObject(i) ?: continue
+                val id = aObj.optString("id", "").trim()
+                val label = aObj.optString("label", "").trim()
+                if (id.isNotEmpty() && label.isNotEmpty()) {
+                    parsedActions += PipAction(id = id, label = label)
+                }
+            }
+        }
+
         return CameraRequest(
             cameraAlias = obj.optString("camera_alias", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             cameraEntity = obj.optString("camera_entity", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
@@ -140,7 +153,9 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             showTimestamp = if (obj.has("show_timestamp") && !obj.isNull("show_timestamp")) obj.optBoolean("show_timestamp") else null,
             showCountdownBar = if (obj.has("show_countdown_bar") && !obj.isNull("show_countdown_bar")) obj.optBoolean("show_countdown_bar") else null,
             snapshotEntity = obj.optString("snapshot_entity", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
-            speakText = obj.optString("speak_text", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+            speakText = obj.optString("speak_text", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            cid = obj.optString("cid", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            actions = parsedActions
         )
     }
 }

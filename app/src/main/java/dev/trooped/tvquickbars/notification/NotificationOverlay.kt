@@ -198,7 +198,11 @@ fun NotificationOverlay(
             // Try stream-first for a fresh frame; only show fallback still AFTER we tried the stream.
             val haBase = remember { normalizedHaBase(ctx)?.toString()?.trimEnd('/') }
             val entityId = remember(imageUrl) {
-                imageUrl.substringAfter("/api/camera_proxy/").substringAfter("/api/camera_proxy_stream/")
+                imageUrl
+                    .substringAfter("/api/camera_proxy/")
+                    .substringAfter("/api/camera_proxy_stream/")
+                    .substringBefore("?")
+                    .substringBefore("#")
             }.takeIf { it.isNotBlank() }
 
             var freshFrame by remember(entityId) { mutableStateOf<ByteArray?>(null) }

@@ -108,8 +108,8 @@ object EntityActionExecutor {
                 val entityDomain = entity.id.substringBefore('.')
                 EntityAction.ServiceCall(entityDomain, "toggle")
             }
-            DefaultAct.PRESS       -> EntityAction.ServiceCall("button", "press")
-            DefaultAct.TURN_ON     -> EntityAction.ServiceCall("script", "turn_on")
+            DefaultAct.PRESS       -> EntityAction.ServiceCall(entity.id.substringBefore('.'), "press")
+            DefaultAct.TURN_ON     -> EntityAction.ServiceCall(entity.id.substringBefore('.'), "turn_on")
             DefaultAct.NONE        -> EntityAction.Default
             DefaultAct.CAMERA_PIP  -> EntityAction.BuiltIn(EntityAction.Special.CAMERA_PIP)
             DefaultAct.TRIGGER     -> EntityAction.ServiceCall("automation", "trigger")

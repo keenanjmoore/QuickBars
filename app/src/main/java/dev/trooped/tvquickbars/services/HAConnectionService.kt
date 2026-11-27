@@ -17,11 +17,13 @@ import androidx.lifecycle.LifecycleService
 import dev.trooped.tvquickbars.R
 import dev.trooped.tvquickbars.background.BackgroundHaConnectionManager
 import dev.trooped.tvquickbars.background.HAStateStore
+import dev.trooped.tvquickbars.ha.ConnectionState
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -54,27 +56,21 @@ class HAConnectionService : LifecycleService() {
             if (!BackgroundHaConnectionManager.isRunning()) {
                 Log.w(TAG, "Background manager stopped unexpectedly, restarting")
                 BackgroundHaConnectionManager.start(applicationContext)
+                continue
             }
 
-            // Check last successful connection time
-            val lastConnection = BackgroundHaConnectionManager.getLastSuccessfulConnectionTime()
-            if (lastConnection > 0 && System.currentTimeMillis() - lastConnection > 60 * 60 * 1000) {
-                Log.w(TAG, "No successful connection in over an hour, restarting manager")
-                BackgroundHaConnectionManager.stop()
-                delay(1000)
-                BackgroundHaConnectionManager.start(applicationContext)
-            }
-        }
-    }
-
-    private val screenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF, Intent.ACTION_DREAMING_STARTED -> {
-                    BackgroundHaConnectionManager.onScreenStateChanged(applicationContext, isScreenOff = true)
-                }
-                Intent.ACTION_SCREEN_ON, Intent.ACTION_DREAMING_STOPPED -> {
-                    BackgroundHaConnectionManager.onScreenStateChanged(applicationContext, isScreenOff = false)
+            // Never tear down an actively healthy WebSocket connection at the 60m mark;
+            // only restart if disconnected/stalled for over an hour without any recovery.
+            val isActivelyConnected = HAStateStore.connection.value is ConnectionState.Connected
+            if (isActivelyConnected) {
+                BackgroundHaConnectionManager.touchLastSuccessfulConnectionTime()
+            } else {
+                val lastConnection = BackgroundHaConnectionManager.getLastSuccessfulConnectionTime()
+                if (lastConnection > 0 && System.currentTimeMillis() - lastConnection > 60 * 60 * 1000) {
+                    Log.w(TAG, "Disconnected without recovery for over an hour, restarting manager")
+                    BackgroundHaConnectionManager.stop()
+                    delay(1000)
+                    BackgroundHaConnectionManager.start(applicationContext)
                 }
             }
         }
@@ -84,14 +80,7 @@ class HAConnectionService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         makeChannel()
-
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_SCREEN_ON)
-            addAction(Intent.ACTION_DREAMING_STARTED)
-            addAction(Intent.ACTION_DREAMING_STOPPED)
-        }
-        ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        ScreenStateMonitor.ensureRegistered(applicationContext)
 
 
         val n = buildNotification("Connecting…")
@@ -127,7 +116,7 @@ class HAConnectionService : LifecycleService() {
         Log.d("HAConnection", "Service being destroyed, shutting down background connection")
 
         serviceMonitorJob.cancel()
-        try { unregisterReceiver(screenReceiver) } catch (_: Throwable) {}
+        scope.cancel()
 
         super.onDestroy()
         BackgroundHaConnectionManager.stop()

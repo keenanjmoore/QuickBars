@@ -45,23 +45,29 @@ class SavedEntitiesManager(val context: Context) {
         @Volatile
         private var cachedEntities: List<EntityItem>? = null
 
+        val sharedGson: Gson by lazy {
+            GsonBuilder()
+                .registerTypeAdapter(EntityAction::class.java, EntityActionTypeAdapter())
+                .registerTypeAdapter(
+                    object : TypeToken<Map<PressType, String?>>() {}.type,
+                    PressTargetsTypeAdapter()
+                )
+                .registerTypeAdapter(
+                    object : TypeToken<Map<String, Any?>>() {}.type,
+                    LastKnownStateAdapter()
+                )
+                .create()
+        }
+
         fun invalidateCache() {
             synchronized(cacheLock) {
                 cachedEntities = null
             }
         }
     }
-    val gson = GsonBuilder()
-        .registerTypeAdapter(EntityAction::class.java, EntityActionTypeAdapter())
-        .registerTypeAdapter(
-            object : TypeToken<Map<PressType, String?>>() {}.type,
-            PressTargetsTypeAdapter()
-        )
-        .registerTypeAdapter(
-            object : TypeToken<Map<String, Any?>>() {}.type,
-            LastKnownStateAdapter()
-        )
-        .create()
+
+    val gson: Gson
+        get() = sharedGson
 
     // Add this inner class for EntityAction deserialization
     private class EntityActionTypeAdapter : JsonDeserializer<EntityAction>,

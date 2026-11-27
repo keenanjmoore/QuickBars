@@ -44,11 +44,20 @@ import dev.trooped.tvquickbars.ha.ValidationResult
 import dev.trooped.tvquickbars.persistence.AppPrefs
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.services.QuickBarService
+import dev.trooped.tvquickbars.utils.AppUpdateManager
 import dev.trooped.tvquickbars.utils.DemoModeManager
 import dev.trooped.tvquickbars.utils.PermissionUtils
 import dev.trooped.tvquickbars.utils.PlusStatusManager
+import dev.trooped.tvquickbars.utils.SharedHttpClients
 import dev.trooped.tvquickbars.utils.TokenTransferHelper
+import dev.trooped.tvquickbars.background.BackgroundHaConnectionManager
+import dev.trooped.tvquickbars.background.HAStateStore
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.Request
+import java.io.File
 
 /**
  * SettingsFragment
@@ -294,11 +303,175 @@ class SettingsFragment : Fragment(), HomeAssistantListener {
         }
 
         // 3. Format your string resource with the version name
-        //    (Make sure you've updated the string in strings.xml to "Version %1$s")
         val formattedVersionString = getString(R.string.about_app_version, versionName)
 
-        // 4. Set the text
-        aboutVersionTextView.text = formattedVersionString
+        // 4. Set the text and expose v1.7 PiP Controls, Diagnostics & GitHub Update panel
+        aboutVersionTextView.text = "$formattedVersionString • Tap for v1.7 Controls & Updates"
+        aboutVersionTextView.isFocusable = true
+        aboutVersionTextView.isClickable = true
+        aboutVersionTextView.setOnClickListener {
+            showQuickBarsSuiteControlsDialog(versionName ?: "1.7.0")
+        }
+
+        (aboutVersionTextView.parent as? ViewGroup)?.let { parentGroup ->
+            val controlsBtn = com.google.android.material.button.MaterialButton(requireContext()).apply {
+                text = "PiP Controls, Diagnostics & Updates"
+                isAllCaps = false
+                isFocusable = true
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = 12 }
+                setOnClickListener {
+                    showQuickBarsSuiteControlsDialog(versionName ?: "1.7.0")
+                }
+            }
+            parentGroup.addView(controlsBtn)
+        }
+    }
+
+    private fun showQuickBarsSuiteControlsDialog(currentVersion: String) {
+        val ctx = requireContext()
+        val opacityPct = (AppPrefs.getDefaultPipOpacity(ctx) * 100).toInt()
+        val dnd = AppPrefs.isDndEnabled(ctx)
+        val qh = AppPrefs.isQuietHoursEnabled(ctx)
+        val dock = AppPrefs.isAutoDockEnabled(ctx)
+        val maxSlots = AppPrefs.getPipMaxSlots(ctx)
+        val connState = HAStateStore.connection.value::class.simpleName ?: "Unknown"
+        val a11yBound = QuickBarService.serviceInstance != null
+        val reconnects = BackgroundHaConnectionManager.getWsReconnectCount()
+
+        val items = arrayOf(
+            "Default PiP Opacity: $opacityPct% (Tap to cycle)",
+            "Cinema DND: ${if (dnd) "ON" else "OFF"} (Tap to toggle)",
+            "Quiet Hours: ${if (qh) "ON" else "OFF"} (Tap to toggle)",
+            "Auto-Dock in Video Apps: ${if (dock) "ON" else "OFF"} (Tap to toggle)",
+            "Max Concurrent PiP Slots: $maxSlots (Tap to cycle 1-4)",
+            "Diagnostics: WS=$connState | A11y=${if (a11yBound) "Bound" else "Unbound"} | Reconnects=$reconnects (Publish Now)",
+            "Check GitHub Release Update (current v$currentVersion)"
+        )
+
+        MaterialAlertDialogBuilder(ctx)
+            .setTitle("QuickBars v1.7 Controls & Diagnostics")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> {
+                        val steps = listOf(0.50f, 0.65f, 0.80f, 0.90f, 1.00f)
+                        val cur = AppPrefs.getDefaultPipOpacity(ctx)
+                        val next = steps.firstOrNull { it > cur + 0.04f } ?: steps.first()
+                        AppPrefs.setDefaultPipOpacity(ctx, next)
+                        BackgroundHaConnectionManager.applyLiveOpacityToActivePips(next)
+                        BackgroundHaConnectionManager.publishTelemetryNow(ctx, trigger = "settings_ui")
+                        Toast.makeText(ctx, "PiP opacity set to ${(next * 100).toInt()}%", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> {
+                        val next = !AppPrefs.isDndEnabled(ctx)
+                        AppPrefs.setDndEnabled(ctx, next)
+                        BackgroundHaConnectionManager.publishTelemetryNow(ctx, trigger = "settings_ui")
+                        Toast.makeText(ctx, "Cinema DND: ${if (next) "ON" else "OFF"}", Toast.LENGTH_SHORT).show()
+                    }
+                    2 -> {
+                        val next = !AppPrefs.isQuietHoursEnabled(ctx)
+                        AppPrefs.setQuietHoursConfig(ctx, next, AppPrefs.getQuietHoursStartHour(ctx), AppPrefs.getQuietHoursEndHour(ctx))
+                        BackgroundHaConnectionManager.publishTelemetryNow(ctx, trigger = "settings_ui")
+                        Toast.makeText(ctx, "Quiet Hours: ${if (next) "ON" else "OFF"}", Toast.LENGTH_SHORT).show()
+                    }
+                    3 -> {
+                        val next = !AppPrefs.isAutoDockEnabled(ctx)
+                        AppPrefs.setAutoDockEnabled(ctx, next)
+                        BackgroundHaConnectionManager.publishTelemetryNow(ctx, trigger = "settings_ui")
+                        Toast.makeText(ctx, "Auto-Dock: ${if (next) "ON" else "OFF"}", Toast.LENGTH_SHORT).show()
+                    }
+                    4 -> {
+                        val next = (AppPrefs.getPipMaxSlots(ctx) % 4) + 1
+                        AppPrefs.setPipMaxSlots(ctx, next)
+                        BackgroundHaConnectionManager.publishTelemetryNow(ctx, trigger = "settings_ui")
+                        Toast.makeText(ctx, "Max PiP Slots: $next", Toast.LENGTH_SHORT).show()
+                    }
+                    5 -> {
+                        BackgroundHaConnectionManager.publishTelemetryNow(ctx, trigger = "settings_ui")
+                        BackgroundHaConnectionManager.publishDiagnosticsNow(ctx)
+                        Toast.makeText(ctx, "Published telemetry & diagnostics to Home Assistant", Toast.LENGTH_SHORT).show()
+                    }
+                    6 -> checkAndDownloadReleaseUpdate(currentVersion)
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun checkAndDownloadReleaseUpdate(currentVersion: String) {
+        val ctx = context ?: return
+        Toast.makeText(ctx, "Checking GitHub Releases…", Toast.LENGTH_SHORT).show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val release = AppUpdateManager.fetchLatestGitHubRelease()
+            if (!isAdded) return@launch
+            if (release == null) {
+                Toast.makeText(ctx, "Could not reach GitHub Releases", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val cmp = AppUpdateManager.compareSemVer(release.versionName, currentVersion)
+            if (cmp <= 0) {
+                MaterialAlertDialogBuilder(ctx)
+                    .setTitle("Up to Date")
+                    .setMessage("You are already running QuickBars v$currentVersion (latest: ${release.tagName}).")
+                    .setPositiveButton("OK", null)
+                    .show()
+                return@launch
+            }
+
+            MaterialAlertDialogBuilder(ctx)
+                .setTitle("Update Available: ${release.tagName}")
+                .setMessage("${release.notes}\n\nDownload and install ${release.tagName} now?")
+                .setNegativeButton("Later", null)
+                .setPositiveButton("Install Update") { _, _ ->
+                    val url = release.apkUrl
+                    if (url.isNullOrBlank()) {
+                        release.htmlUrl?.let { u ->
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
+                        }
+                    } else {
+                        downloadAndInstallApk(url, release.tagName)
+                    }
+                }
+                .show()
+        }
+    }
+
+    private fun downloadAndInstallApk(apkUrl: String, tagName: String) {
+        val ctx = context ?: return
+        Toast.makeText(ctx, "Downloading $tagName…", Toast.LENGTH_SHORT).show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val apkFile = withContext(Dispatchers.IO) {
+                runCatching {
+                    val outDir = File(ctx.cacheDir, "updates").apply { mkdirs() }
+                    val target = File(outDir, "QuickBars-$tagName.apk")
+                    val req = Request.Builder().url(apkUrl).build()
+                    SharedHttpClients.mediaFetch.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) return@runCatching null
+                        resp.body?.byteStream()?.use { input ->
+                            target.outputStream().use { output -> input.copyTo(output) }
+                        } ?: return@runCatching null
+                    }
+                    target
+                }.getOrNull()
+            }
+            if (!isAdded) return@launch
+            if (apkFile == null || !apkFile.exists()) {
+                Toast.makeText(ctx, "Download failed", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            try {
+                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", apkFile)
+                val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(installIntent)
+            } catch (t: Throwable) {
+                Toast.makeText(ctx, "Installer launch failed: ${t.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     private fun updatePlusUI(isPlus: Boolean) {

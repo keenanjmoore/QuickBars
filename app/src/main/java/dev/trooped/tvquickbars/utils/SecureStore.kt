@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
+import java.security.GeneralSecurityException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -202,9 +203,20 @@ object SecureStore {
         cachedToken?.let { return it }
         val enc = ctx.secureDataStore.data.first()[TOKEN_KEY] ?: return null
         val plain = withContext(kotlinx.coroutines.Dispatchers.IO) {
-            decrypt(EncryptedBlob.fromBase64(enc), ctx)
+            try {
+                decrypt(EncryptedBlob.fromBase64(enc), ctx)
+            } catch (e: GeneralSecurityException) {
+                Log.w("SecureStore", "Stored HA token could not be decrypted (keystore invalidated?); clearing stale blob: ${e.message}")
+                runCatching { ctx.secureDataStore.edit { it.remove(TOKEN_KEY) } }
+                null
+            } catch (t: Throwable) {
+                Log.w("SecureStore", "Unexpected error decoding HA token: ${t.message}")
+                null
+            }
         }
-        cachedToken = plain
+        if (plain != null) {
+            cachedToken = plain
+        }
         return plain
     }
 

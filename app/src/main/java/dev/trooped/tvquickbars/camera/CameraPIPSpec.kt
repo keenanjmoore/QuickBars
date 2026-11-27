@@ -3,28 +3,31 @@ package dev.trooped.tvquickbars.camera
 import android.os.Parcel
 import android.os.Parcelable
 
+/** Compact interactive action pill rendered inside a PiP window (e.g. Doorbell controls). */
+data class PipAction(
+    val id: String,
+    val label: String
+) : Parcelable {
+    constructor(parcel: Parcel) : this(
+        id = parcel.readString() ?: "",
+        label = parcel.readString() ?: ""
+    )
+
+    override fun writeToParcel(parcel: Parcel, flags: Int) {
+        parcel.writeString(id)
+        parcel.writeString(label)
+    }
+
+    override fun describeContents(): Int = 0
+
+    companion object CREATOR : Parcelable.Creator<PipAction> {
+        override fun createFromParcel(parcel: Parcel): PipAction = PipAction(parcel)
+        override fun newArray(size: Int): Array<PipAction?> = arrayOfNulls(size)
+    }
+}
+
 /**
- * Data class representing the specifications for a Camera Picture-in-Picture (PIP) window.
- * This class is Parcelable, allowing it to be passed between components, such as Activities or Services.
- *
- * @property url The URL of the camera stream.
- * @property authToken Optional authentication token for accessing the camera stream.
- * @property entityId The unique identifier for the camera entity.
- * @property title The title to be displayed for the PIP window.
- * @property widthDp The width of the PIP window in density-independent pixels (dp).
- * @property heightDp The height of the PIP window in density-independent pixels (dp).
- * @property marginDp The margin around the PIP window in density-independent pixels (dp).
- * @property showTitle A boolean indicating whether to display the title in the PIP window.
- * @property cornerPosition The initial corner position of the PIP window on the screen.
- *                          Defaults to "TOP_LEFT". Other possible values: "TOP_RIGHT",
- *                          "BOTTOM_LEFT", "BOTTOM_RIGHT".
- * @property autoHideTimeout The duration in seconds after which the PIP window should automatically
- *                           hide if there's no interaction. Defaults to 30 seconds.
- * @property rtspProfile Advanced streaming profile parameters for RTSP feeds.
- * @property slotKey Unique identifier for the window slot (defaults to cornerPosition).
- * @property isGroup True if this spec represents a multi-camera combined dock/grid.
- * @property groupSpecs Sub-camera specifications when rendering in multi-camera mode.
- * @property groupLayout Layout format for multi-camera mode: "grid", "side_by_side", "stacked".
+ * Data class representing the specifications for a Camera Picture-in-Picture (PiP) window.
  */
 data class CameraPipSpec(
     val url: String = "",
@@ -44,6 +47,7 @@ data class CameraPipSpec(
     val groupLayout: String = "grid",
     val autoCloseOnSleep: Boolean = true,
     val snapshotUrl: String? = null,
+    val fallbackMjpegUrl: String? = null,
     val borderColorHex: String? = null,
     val borderWidthDp: Int = 0,
     val cornerRadiusDp: Int = 8,
@@ -51,11 +55,13 @@ data class CameraPipSpec(
     val showLiveBadge: Boolean = true,
     val showTimestamp: Boolean = false,
     val showCountdownBar: Boolean = true,
-    val isFullscreen: Boolean = false
+    val isFullscreen: Boolean = false,
+    val cid: String? = null,
+    val actions: List<PipAction> = emptyList()
 ) : Parcelable {
     constructor(parcel: Parcel) : this(
         url = parcel.readString() ?: "",
-        authToken = parcel.readString(), // Fixed: Preserves null token cleanly
+        authToken = parcel.readString(),
         entityId = parcel.readString() ?: "",
         title = parcel.readString() ?: "",
         widthDp = parcel.readInt(),
@@ -73,6 +79,7 @@ data class CameraPipSpec(
         groupLayout = parcel.readString() ?: "grid",
         autoCloseOnSleep = parcel.readInt() != 0,
         snapshotUrl = parcel.readString(),
+        fallbackMjpegUrl = parcel.readString(),
         borderColorHex = parcel.readString(),
         borderWidthDp = parcel.readInt(),
         cornerRadiusDp = parcel.readInt(),
@@ -80,7 +87,11 @@ data class CameraPipSpec(
         showLiveBadge = parcel.readInt() != 0,
         showTimestamp = parcel.readInt() != 0,
         showCountdownBar = parcel.readInt() != 0,
-        isFullscreen = parcel.readInt() != 0
+        isFullscreen = parcel.readInt() != 0,
+        cid = parcel.readString(),
+        actions = mutableListOf<PipAction>().apply {
+            parcel.readTypedList(this, PipAction.CREATOR)
+        }
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -94,7 +105,6 @@ data class CameraPipSpec(
         parcel.writeInt(if (showTitle) 1 else 0)
         parcel.writeString(cornerPosition)
         parcel.writeInt(autoHideTimeout)
-        // Fixed critical bug: writeParcelable instead of readParcelable
         parcel.writeParcelable(rtspProfile, flags)
         parcel.writeString(slotKey)
         parcel.writeInt(if (isGroup) 1 else 0)
@@ -102,6 +112,7 @@ data class CameraPipSpec(
         parcel.writeString(groupLayout)
         parcel.writeInt(if (autoCloseOnSleep) 1 else 0)
         parcel.writeString(snapshotUrl)
+        parcel.writeString(fallbackMjpegUrl)
         parcel.writeString(borderColorHex)
         parcel.writeInt(borderWidthDp)
         parcel.writeInt(cornerRadiusDp)
@@ -110,6 +121,8 @@ data class CameraPipSpec(
         parcel.writeInt(if (showTimestamp) 1 else 0)
         parcel.writeInt(if (showCountdownBar) 1 else 0)
         parcel.writeInt(if (isFullscreen) 1 else 0)
+        parcel.writeString(cid)
+        parcel.writeTypedList(actions)
     }
 
     override fun describeContents(): Int = 0

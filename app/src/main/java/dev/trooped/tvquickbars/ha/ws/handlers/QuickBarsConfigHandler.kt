@@ -11,15 +11,20 @@ import org.json.JSONObject
 /**
  * Handles remote management events from Home Assistant:
  * - `quickbars.config`: updates DND, quiet hours, default camera auto-hide, max PiP slots,
- *   RTSP latency mode, auto-dock, telemetry interval, or device alias cleanly over WebSocket.
+ *   RTSP latency mode, auto-dock, opacity, telemetry interval, or device alias cleanly over WebSocket.
  * - `quickbars.ping`: immediately emits `quickbars.telemetry` for live HA dashboard/watchdog checks.
+ * - `quickbars.diagnostics`: emits `quickbars.diagnostics_result` with active codecs, slots, RAM, and errors.
+ * - `quickbars.focus`: dismisses, expands, or cycles active PiP overlays remotely.
  */
 class QuickBarsConfigHandler : WsHandler {
     private val TAG = "QuickBarsConfig"
 
     override fun canHandle(event: JSONObject): Boolean {
         val type = event.optString("event_type")
-        return type == "quickbars.config" || type == "quickbars.ping"
+        return type == "quickbars.config" ||
+            type == "quickbars.ping" ||
+            type == "quickbars.diagnostics" ||
+            type == "quickbars.focus"
     }
 
     override fun handle(event: JSONObject, ctx: HaClientBridge) {
@@ -33,6 +38,19 @@ class QuickBarsConfigHandler : WsHandler {
 
         if (type == "quickbars.ping") {
             BackgroundHaConnectionManager.publishTelemetryNow(context, trigger = "ping")
+            return
+        }
+
+        if (type == "quickbars.diagnostics") {
+            BackgroundHaConnectionManager.publishDiagnosticsNow(context)
+            return
+        }
+
+        if (type == "quickbars.focus") {
+            val action = data.optString("action", "dismiss").trim()
+            if (action.isNotEmpty()) {
+                BackgroundHaConnectionManager.handleRemoteFocus(action)
+            }
             return
         }
 
@@ -86,11 +104,7 @@ class QuickBarsConfigHandler : WsHandler {
             AppPrefs.setHaDeviceAlias(context, alias.takeIf { it.isNotEmpty() })
             changed = true
         }
-        val rawOpacity = when {
-            data.has("default_opacity") -> data.optDouble("default_opacity", Double.NaN)
-            data.has("opacity") -> data.optDouble("opacity", Double.NaN)
-            else -> Double.NaN
-        }
+        val rawOpacity = normalizeOpacity(data)
         if (!rawOpacity.isNaN()) {
             val norm = (if (rawOpacity > 1.0) rawOpacity / 100.0 else rawOpacity).coerceIn(0.25, 1.0).toFloat()
             AppPrefs.setDefaultPipOpacity(context, norm)
@@ -101,6 +115,16 @@ class QuickBarsConfigHandler : WsHandler {
         if (changed) {
             Log.i(TAG, "Applied remote config update from HA: $data")
             BackgroundHaConnectionManager.publishTelemetryNow(context, trigger = "config")
+        }
+    }
+
+    internal companion object {
+        fun normalizeOpacity(data: JSONObject): Double {
+            return when {
+                data.has("default_opacity") -> data.optDouble("default_opacity", Double.NaN)
+                data.has("opacity") -> data.optDouble("opacity", Double.NaN)
+                else -> Double.NaN
+            }
         }
     }
 }

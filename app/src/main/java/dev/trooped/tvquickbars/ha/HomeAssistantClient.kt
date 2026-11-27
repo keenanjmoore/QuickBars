@@ -93,10 +93,12 @@ class HomeAssistantClient(
     private val isInDemoMode: Boolean
         get() = DemoModeManager.isInDemoMode
 
+    private val subscribeEntitiesHandler = SubscribeEntitiesHandler()
+
     private val messageRouter by lazy {
         MessageRouter(
             listOf(
-                SubscribeEntitiesHandler(),
+                subscribeEntitiesHandler,
                 StateChangedHandler(),
                 QuickBarsOpenHandler(),
                 QuickBarsNotifyHandler(),
@@ -191,6 +193,7 @@ class HomeAssistantClient(
     fun disconnect() {
         val ws = webSocket
         webSocket = null
+        subscribeEntitiesHandler.clearCache()
         if (_connectionState.value !is ConnectionState.Error) {
             _connectionState.value = ConnectionState.Disconnected
         }
@@ -239,6 +242,13 @@ class HomeAssistantClient(
      * These functions can be used without needing an instance of HomeAssistantClient.
      */
     companion object {
+        private val discoveredWatchIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+        private fun isQuickBarsWatchedHelper(id: String): Boolean =
+            id.startsWith("camera.") ||
+                id.startsWith("input_boolean.quickbars_") ||
+                id.startsWith("input_number.quickbars_") ||
+                id.startsWith("input_select.quickbars_")
         /**
          * A reusable, self-contained function to test HA credentials.
          * It creates a temporary client, checks the connection, and returns a result.
@@ -556,9 +566,19 @@ class HomeAssistantClient(
             when (message.optString("type")) {
                 "auth_ok" -> {
                     lastPongElapsedMs = android.os.SystemClock.elapsedRealtime()
+                    subscribeEntitiesHandler.clearCache()
                     _connectionState.value = ConnectionState.Connected
-                    val getStatesMessage = JSONObject().apply { put("id", 1); put("type", "get_states") }
-                    webSocket.send(getStatesMessage.toString())
+                    val ctx = getContext()
+                    val hasSaved = useEntitySubscription && ctx != null && SavedEntitiesManager(ctx).loadEntities().isNotEmpty()
+                    if (useEntitySubscription && discoveredWatchIds.isNotEmpty() && hasSaved) {
+                        // Fast reconnect path: subscribe_entities initial 'a' snapshot delivers full states
+                        // for all saved + camera + quickbars helper entities without >1MB get_states churn.
+                        knownIds.addAll(discoveredWatchIds)
+                        subscribeToRelevantEntities(webSocket)
+                    } else {
+                        val getStatesMessage = JSONObject().apply { put("id", 1); put("type", "get_states") }
+                        webSocket.send(getStatesMessage.toString())
+                    }
                     subscribeToEvents(webSocket)
                 }
                 "auth_invalid" -> _connectionState.value = ConnectionState.Error(ConnectionState.Reason.AUTH_FAILED)
@@ -663,6 +683,8 @@ class HomeAssistantClient(
             "quickbars.notify",
             "quickbars.config",
             "quickbars.ping",
+            "quickbars.diagnostics",
+            "quickbars.focus",
             EVENT_REQ
         )
         for (evType in quickbarEvents) {
@@ -685,10 +707,12 @@ class HomeAssistantClient(
             SavedEntitiesManager(ctx).loadEntities().forEach { ids += it.id }
         }
         for (id in knownIds) {
-            if (id.startsWith("camera.") || id.startsWith("input_boolean.quickbars_")) {
+            if (isQuickBarsWatchedHelper(id)) {
                 ids += id
+                discoveredWatchIds += id
             }
         }
+        ids.addAll(discoveredWatchIds)
         if (ids.isEmpty()) {
             // Fallback to state_changed if user hasn't imported entities or cameras yet
             val fallback = JSONObject().apply {
@@ -730,12 +754,14 @@ class HomeAssistantClient(
             val entity = allEntities.getJSONObject(i)
             val entityId = entity.getString("entity_id")
             knownIds += entityId
+            if (isQuickBarsWatchedHelper(entityId)) {
+                discoveredWatchIds += entityId
+            }
 
             // In background subscription mode, skip allocating/sorting thousands of unused entities
             if (useEntitySubscription && savedIds.isNotEmpty() &&
                 entityId !in savedIds &&
-                !entityId.startsWith("camera.") &&
-                !entityId.startsWith("input_boolean.quickbars_")
+                !isQuickBarsWatchedHelper(entityId)
             ) {
                 continue
             }
@@ -769,7 +795,9 @@ class HomeAssistantClient(
         }
 
         listener.onEntitiesFetched(categoryList)
-        HAStateStore.setCategories(categoryList)
+        if (listener !is dev.trooped.tvquickbars.background.BackgroundHaConnectionManager) {
+            HAStateStore.setCategories(categoryList)
+        }
         Log.d(TAG, "entitiesFetched categories=${categoryList.size} trackedEntities=${categoryList.sumOf { it.entities.size }} totalKnown=${knownIds.size}")
     }
 }

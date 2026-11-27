@@ -1,17 +1,18 @@
 blueprint:
-  name: "QuickBars Smart TV Camera & Alert Suite (v1.6)"
+  name: "QuickBars Smart TV Camera & Alert Suite (v1.7)"
   description: >
-    All-in-one QuickBars v1.6 Smart TV automation blueprint unifying motion & doorbell camera RTSP/HA-proxy
-    PiP pop-ups, snapshot-first frame preloading, non-overlapping corner collision resolution, awake-only
-    targeting, full visual HUD styling (borders, corner radius, countdown bar, clock badge, fullscreen
-    doorbell takeover), Android TV spoken TTS alerts, actionable snapshot cards, helper config sync,
-    automatic Cinema DND, Shield offline watchdogs, and post-playback AccessibilityService rebind.
+    All-in-one QuickBars v1.7 Smart TV automation blueprint unifying motion & doorbell camera RTSP/HA-proxy
+    PiP pop-ups, snapshot-first frame preloading, non-overlapping corner collision resolution, 2-Cam Split Dock
+    & Auto Quad View, awake-only targeting (with Sabrina Google TV fleet support), detection-class accent borders,
+    cross-sensor dedup, night/cinema ambient opacity dimming, Guest Privacy Mode, full HUD styling,
+    optional in-PiP Doorbell Quick-Action pills, Doorbell Plex auto-pause/resume, Android TV TTS alerts,
+    debounced helper config sync, automatic Cinema DND, Shield offline watchdogs, and post-playback A11y rebind.
   domain: automation
   source_url: https://github.com/keenanjmoore/QuickBars/blob/main/ha_blueprints/quickbars_smart_tv_suite.yaml
   homeassistant:
     min_version: 2024.6.0
   input:
-    # ── 1. Triggers, Cooldown & Presence Guards ────────────────────────────────
+    # ── 1. Triggers, Cooldown, Dedup & Privacy Guards ──────────────────────────
     triggers_and_guards:
       name: "1. Triggers, Cooldown & Presence"
       icon: mdi:motion-sensor
@@ -24,6 +25,22 @@ blueprint:
           selector:
             entity:
               domain: input_boolean
+        guest_mode_helper:
+          name: Guest / Privacy Mode Helper (Optional)
+          description: When ON, suppresses pop-ups for Indoor Camera Entities listed below.
+          default: input_boolean.quickbars_guest_mode
+          selector:
+            entity:
+              domain: input_boolean
+        indoor_camera_entities:
+          name: Indoor Camera Entities Hidden in Guest Mode
+          default:
+            - camera.kitchen
+            - camera.baby_room_camera
+          selector:
+            entity:
+              multiple: true
+              domain: camera
         person_binary_sensors:
           name: Person / Motion / Visitor Binary Sensors
           description: Binary sensors (Reolink, Frigate occupancy, etc.) that trigger camera PiP on 'on'.
@@ -48,6 +65,15 @@ blueprint:
             number:
               min: 0
               max: 120
+              unit_of_measurement: s
+        cross_sensor_dedup_seconds:
+          name: Physical Camera Cross-Sensor Dedup (Seconds)
+          description: Suppresses duplicate pop-ups/TTS when another sensor on the same physical camera just fired.
+          default: 2
+          selector:
+            number:
+              min: 0
+              max: 15
               unit_of_measurement: s
         optional_home_presence_entity:
           name: Optional Presence Filter Entity
@@ -130,6 +156,12 @@ blueprint:
               restart_script: script.restart_quickbars_conners_room
           selector:
             object: {}
+        include_dynamic_google_tv:
+          name: Include Dynamic Sabrina Google TV Sensor
+          description: Automatically target sensor.quickbars_sabrinas_google_tv whenever its app_id is populated.
+          default: true
+          selector:
+            boolean: {}
         excluded_app_ids:
           name: Excluded App IDs
           description: Optional list of QuickBars App IDs to skip for camera pop-ups.
@@ -137,9 +169,9 @@ blueprint:
           selector:
             object: {}
 
-    # ── 4. PiP Visual Styling & HUD (QuickBars v1.6) ───────────────────────────
+    # ── 4. PiP Visual Styling & HUD (QuickBars v1.7) ───────────────────────────
     pip_appearance:
-      name: "4. PiP Visual Styling & HUD (v1.6)"
+      name: "4. PiP Visual Styling & HUD (v1.7)"
       icon: mdi:palette-outline
       collapsed: true
       input:
@@ -173,15 +205,29 @@ blueprint:
                 - "4:3"
                 - "1:1"
         border_color:
-          name: Motion Accent Border Hex
-          description: "#RRGGBB border color for motion events (blank = no border)."
+          name: Person / Default Accent Border Hex
+          description: "#RRGGBB border color for person/motion events (blank = no border)."
           default: "#38BDF8"
           selector:
             text: {}
         doorbell_border_color:
           name: Doorbell / Visitor Border Hex
-          description: "#RRGGBB border color for doorbell chimes & visitor alerts."
           default: "#EF4444"
+          selector:
+            text: {}
+        package_border_color:
+          name: Package Border Hex
+          default: "#F59E0B"
+          selector:
+            text: {}
+        vehicle_border_color:
+          name: Vehicle Border Hex
+          default: "#818CF8"
+          selector:
+            text: {}
+        animal_border_color:
+          name: Animal / Pet Border Hex
+          default: "#10B981"
           selector:
             text: {}
         border_width_dp:
@@ -217,7 +263,7 @@ blueprint:
               domain: input_number
         multi_camera_mode_helper:
           name: Multi-Camera Behavior Helper (Optional)
-          description: Controls whether multiple simultaneous cameras open in separate corners or switch to Quad View.
+          description: Controls Separate Corners, Auto Quad View, 2-Cam Split Dock, or Single Corner Replace.
           default: input_select.quickbars_multi_camera_mode
           selector:
             entity:
@@ -316,6 +362,18 @@ blueprint:
           default: false
           selector:
             boolean: {}
+        doorbell_pause_media_players:
+          name: Auto-Pause Media Players on Unmuted Doorbell Chime
+          default: false
+          selector:
+            boolean: {}
+        doorbell_media_players:
+          name: Media Players to Pause & Resume on Doorbell Chime
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: media_player
         software_decoder:
           name: Prefer Software Decoder
           default: false
@@ -344,12 +402,28 @@ blueprint:
                 - critical
                 - high
 
-    # ── 6. Actionable Snapshot Cards & Spoken TTS Alerts ───────────────────────
+    # ── 6. Actionable Snapshot Cards, In-PiP Doorbell Pills & Voice TTS ────────
     notifications_and_voice:
-      name: "6. Actionable Snapshots & Spoken TV Alerts"
+      name: "6. Actionable Snapshots, In-PiP Pills & TTS"
       icon: mdi:bell-ring
       collapsed: true
       input:
+        enable_doorbell_pip_actions:
+          name: Show Quick-Action Pills Inside Doorbell Chime PiP
+          description: Adds focusable pills inside critical chime PiPs (only enable if doorbell remote takeover is desired).
+          default: false
+          selector:
+            boolean: {}
+        doorbell_pip_action_1_label:
+          name: Doorbell Pill 1 Label
+          default: "Porch Light"
+          selector:
+            text: {}
+        doorbell_pip_action_1_actions:
+          name: Doorbell Pill 1 Custom Actions
+          default: []
+          selector:
+            action: {}
         enable_snapshot_notify:
           name: Send Actionable Snapshot Card
           description: Sends quickbars.notify with camera snapshot + action buttons on matching triggers.
@@ -408,9 +482,9 @@ blueprint:
           selector:
             text: {}
 
-    # ── 7. Fleet Sync, Cinema DND, Watchdog & Post-Playback Rebind ─────────────
+    # ── 7. Fleet Sync, Ambient Dimming, Cinema DND & Watchdog ──────────────────
     fleet_management:
-      name: "7. Fleet Sync, Cinema DND & Watchdog"
+      name: "7. Fleet Sync, Ambient Dimming, DND & Watchdog"
       icon: mdi:shield-refresh
       collapsed: true
       input:
@@ -433,6 +507,28 @@ blueprint:
             entity:
               multiple: true
               domain: input_number
+        enable_ambient_dimming:
+          name: Enable Night / Playback Ambient Opacity Dimming
+          description: Automatically dims pip_opacity after sunset or during playback, restoring daytime opacity at sunrise/stop.
+          default: false
+          selector:
+            boolean: {}
+        day_opacity_percent:
+          name: Daytime PiP Opacity (%)
+          default: 90
+          selector:
+            number:
+              min: 40
+              max: 100
+              unit_of_measurement: "%"
+        night_opacity_percent:
+          name: Night / Cinema PiP Opacity (%)
+          default: 65
+          selector:
+            number:
+              min: 25
+              max: 95
+              unit_of_measurement: "%"
         cinema_dnd_helper:
           name: Cinema DND Helper
           default: input_boolean.quickbars_cinema_dnd
@@ -573,7 +669,7 @@ blueprint:
               domain: script
 
 mode: parallel
-max: 10
+max: 12
 
 triggers:
   - trigger: state
@@ -588,7 +684,13 @@ triggers:
     id: helper_sync
   - trigger: state
     entity_id: !input opacity_sync_entities
-    id: helper_sync
+    id: opacity_sync
+  - trigger: sun
+    event: sunset
+    id: ambient_sunset
+  - trigger: sun
+    event: sunrise
+    id: ambient_sunrise
   - trigger: state
     entity_id: !input cinema_media_players
     to: "playing"
@@ -627,7 +729,10 @@ conditions: []
 actions:
   - variables:
       master_helper: !input master_enable_helper
+      guest_helper: !input guest_mode_helper
+      indoor_cams: !input indoor_camera_entities
       cooldown_sec: !input per_camera_cooldown_seconds
+      dedup_sec: !input cross_sensor_dedup_seconds
       presence_ent: !input optional_home_presence_entity
       go2rtc_host: !input go2rtc_rtsp_host
       cam_map: !input trigger_camera_map
@@ -636,11 +741,15 @@ actions:
       quad_stream: !input quad_mosaic_stream
       awake_only_flag: !input awake_only
       fleet: !input tv_fleet
+      include_sabrina: !input include_dynamic_google_tv
       excluded_ids: !input excluded_app_ids
       motion_size: !input pip_size
       chime_size: !input doorbell_pip_size
       motion_border: !input border_color
       chime_border: !input doorbell_border_color
+      pkg_border: !input package_border_color
+      veh_border: !input vehicle_border_color
+      ani_border: !input animal_border_color
       border_w: !input border_width_dp
       corner_r: !input corner_radius_dp
       win_opacity: !input pip_opacity
@@ -663,8 +772,12 @@ actions:
       chime_hide: !input doorbell_auto_hide_seconds
       mute_motion: !input mute_audio
       chime_unmute: !input doorbell_unmute_audio
+      chime_pause_media: !input doorbell_pause_media_players
+      chime_players: !input doorbell_media_players
       motion_prio: !input motion_priority
       chime_prio: !input doorbell_priority
+      enable_pip_pills: !input enable_doorbell_pip_actions
+      pip_pill_1_lbl: !input doorbell_pip_action_1_label
       enable_notify: !input enable_snapshot_notify
       notify_filter: !input notify_trigger_filter
       notify_dur: !input notify_duration
@@ -674,6 +787,9 @@ actions:
       act2_lbl: !input notify_action_2_label
       speak_txt: !input doorbell_speak_text
       helper_sync_on: !input enable_helper_sync
+      ambient_dim_on: !input enable_ambient_dimming
+      day_opacity: !input day_opacity_percent
+      night_opacity: !input night_opacity_percent
       dnd_helper: !input cinema_dnd_helper
       qh_helper: !input quiet_hours_helper
       dock_helper: !input auto_dock_helper
@@ -723,22 +839,63 @@ actions:
               selected_title: "{{ entry.get('title', state_attr(trig_ent, 'friendly_name') | default('Camera')) }}"
               base_corner: "{{ entry.get('default_corner', 'top_right') }}"
               is_chime: "{{ ('chime' in trig_ent) or ('visitor' in trig_ent) }}"
+              guest_blocked: >
+                {{ (guest_helper | string | trim | length > 0)
+                   and is_state(guest_helper, 'on')
+                   and (selected_cam in indoor_cams) }}
+              duplicate_physical_recent: >
+                {%- set ns = namespace(dup=false) -%}
+                {%- if (dedup_sec | int) > 0 -%}
+                  {%- for entity, info in cam_map.items() if entity != trig_ent -%}
+                    {%- set same_feed = (selected_cam | length > 0 and info.get('camera', '') == selected_cam)
+                                        or (selected_rtsp | length > 0 and info.get('rtsp', '') == selected_rtsp) -%}
+                    {%- if same_feed -%}
+                      {%- set s = states[entity] -%}
+                      {%- if s and (s.state == 'on') and ((as_timestamp(now()) - as_timestamp(s.last_changed, 0)) < (dedup_sec | int)) -%}
+                        {%- set ns.dup = true -%}
+                      {%- endif -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                {%- endif -%}
+                {{ ns.dup }}
               multi_mode: "{{ states(multi_mode_helper) | default('Separate Corners', true) }}"
               allow_multi_flag: "{{ multi_mode != 'Single Corner Replace' }}"
-              other_occupied: >
-                {%- set ns = namespace(corners=[]) -%}
+              other_active_entries: >
+                {%- set ns = namespace(items=[]) -%}
                 {%- for entity, info in cam_map.items() if entity != trig_ent -%}
                   {%- set same_feed = (selected_cam | length > 0 and info.get('camera', '') == selected_cam)
                                       or (selected_rtsp | length > 0 and info.get('rtsp', '') == selected_rtsp) -%}
                   {%- if not same_feed -%}
                     {%- set s = states[entity] -%}
                     {%- if s and ((s.state == 'on') or (as_timestamp(now()) - as_timestamp(s.last_changed, 0) < (motion_hide | int))) -%}
-                      {%- set ns.corners = ns.corners + [info.get('default_corner', 'top_right')] -%}
+                      {%- set ns.items = ns.items + [info] -%}
                     {%- endif -%}
                   {%- endif -%}
                 {%- endfor -%}
+                {{ ns.items }}
+              other_occupied: >
+                {%- set ns = namespace(corners=[]) -%}
+                {%- for info in other_active_entries -%}
+                  {%- set ns.corners = ns.corners + [info.get('default_corner', 'top_right')] -%}
+                {%- endfor -%}
                 {{ ns.corners }}
-              use_auto_quad: "{{ (multi_mode == 'Auto Quad View') and ((other_occupied | length) > 0) and (quad_stream | string | trim | length > 0) }}"
+              any_tv_has_active_pip: >
+                {%- set ns = namespace(active=false) -%}
+                {%- for item in fleet -%}
+                  {%- if (state_attr(item.sensor, 'active_pip_count') | int(0)) > 0 -%}
+                    {%- set ns.active = true -%}
+                  {%- endif -%}
+                {%- endfor -%}
+                {{ ns.active }}
+              use_auto_quad: >
+                {{ (multi_mode == 'Auto Quad View')
+                   and (((other_occupied | length) > 0) or any_tv_has_active_pip)
+                   and (quad_stream | string | trim | length > 0) }}
+              use_split_dock: >
+                {{ (multi_mode == '2-Cam Split Dock')
+                   and ((other_active_entries | length) > 0)
+                   and ((other_active_entries[0].get('rtsp', '') | length > 0) or (other_active_entries[0].get('camera', '') | length > 0))
+                   and ((selected_rtsp | length > 0) or (selected_cam | length > 0)) }}
               resolved_corner: >
                 {%- set occ = other_occupied if other_occupied is iterable else [] -%}
                 {%- set ns = namespace(chosen=base_corner) -%}
@@ -756,17 +913,41 @@ actions:
                     {% set ns.ids = ns.ids + [item.app_id] %}
                   {% endif %}
                 {% endfor %}
+                {% if include_sabrina %}
+                  {% set sab_id = state_attr('sensor.quickbars_sabrinas_google_tv', 'app_id') | default('', true) | string | trim %}
+                  {% if (sab_id | length > 0) and (sab_id not in ns.ids) and (sab_id not in excl) and (not awake_only_flag or state_attr('sensor.quickbars_sabrinas_google_tv', 'display_on') == true) %}
+                    {% set ns.ids = ns.ids + [sab_id] %}
+                  {% endif %}
+                {% endif %}
                 {{ ns.ids }}
               eff_size: "{{ chime_size if is_chime else motion_size }}"
-              eff_border: "{{ chime_border if is_chime else motion_border }}"
+              eff_border: >
+                {% if is_chime %}
+                  {{ chime_border }}
+                {% elif 'package' in trig_ent %}
+                  {{ pkg_border }}
+                {% elif 'vehicle' in trig_ent or 'car' in trig_ent %}
+                  {{ veh_border }}
+                {% elif 'animal' in trig_ent or 'pet' in trig_ent %}
+                  {{ ani_border }}
+                {% else %}
+                  {{ motion_border }}
+                {% endif %}
               eff_auto_hide: "{{ chime_hide if is_chime else motion_hide }}"
               eff_mute: "{{ (not chime_unmute) if is_chime else mute_motion }}"
               eff_prio: "{{ chime_prio if is_chime else motion_prio }}"
               eff_snap: "{{ selected_cam if (use_snapshot_first and (selected_cam | length > 0)) else '' }}"
               eff_speak: "{{ speak_txt if (is_chime and (speak_txt | string | trim | length > 0)) else '' }}"
+              pip_cid: "qb_pip_{{ trig_ent.split('.')[-1] }}_{{ now().timestamp() | int }}"
+              pip_actions: >
+                {% if enable_pip_pills and is_chime %}
+                  {{ [{'id': 'doorbell_pill_1', 'label': pip_pill_1_lbl}, {'id': 'dismiss', 'label': 'Dismiss'}] }}
+                {% else %}
+                  {{ [] }}
+                {% endif %}
 
           - condition: template
-            value_template: "{{ target_app_ids | length > 0 }}"
+            value_template: "{{ (not guest_blocked) and (not duplicate_physical_recent) and (target_app_ids | length > 0) }}"
 
           - choose:
               - conditions:
@@ -795,6 +976,59 @@ actions:
                       show_toast: "{{ show_toast_flag }}"
                       allow_multiple: false
                       mute_audio: true
+                      rtsp_transport: !input rtsp_transport
+                      rtsp_latency: !input rtsp_latency
+                      software_decoder: !input software_decoder
+                      on_retrigger: extend
+                      auto_close_on_sleep: !input auto_close_on_sleep
+                      priority: "{{ eff_prio }}"
+                      speak_text: "{{ eff_speak }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ use_split_dock }}"
+                sequence:
+                  - variables:
+                      first_other: "{{ other_active_entries[0] }}"
+                      dock_cams: >
+                        {% set list_cams = [] %}
+                        {% set o_rtsp = first_other.get('rtsp', '') %}
+                        {% set o_cam = first_other.get('camera', '') %}
+                        {% set o_title = first_other.get('title', 'Camera 1') %}
+                        {% set item1 = {'title': o_title, 'snapshot_entity': o_cam} %}
+                        {% if o_rtsp | length > 0 %}
+                          {% set item1 = dict(item1, rtsp_url='rtsp://' ~ go2rtc_host ~ '/' ~ o_rtsp) %}
+                        {% elif o_cam | length > 0 %}
+                          {% set item1 = dict(item1, camera_entity=o_cam) %}
+                        {% endif %}
+                        {% set item2 = {'title': selected_title, 'snapshot_entity': selected_cam} %}
+                        {% if selected_rtsp | length > 0 %}
+                          {% set item2 = dict(item2, rtsp_url='rtsp://' ~ go2rtc_host ~ '/' ~ selected_rtsp) %}
+                        {% elif selected_cam | length > 0 %}
+                          {% set item2 = dict(item2, camera_entity=selected_cam) %}
+                        {% endif %}
+                        {{ [item1, item2] }}
+                  - event: quickbars.open
+                    event_data:
+                      target_ids: "{{ target_app_ids }}"
+                      cameras: "{{ dock_cams }}"
+                      layout: side_by_side
+                      position: top_right
+                      slot: "TOP_RIGHT"
+                      size: small
+                      camera_title: "2-Cam Split Dock"
+                      auto_hide: "{{ [eff_auto_hide | int, 30] | max }}"
+                      show_title: !input show_title
+                      show_live_badge: "{{ show_live_flag }}"
+                      show_timestamp: "{{ show_ts_flag }}"
+                      show_countdown_bar: "{{ show_bar_flag }}"
+                      border_color: "{{ eff_border }}"
+                      border_width_dp: "{{ border_w | int }}"
+                      corner_radius_dp: "{{ corner_r | int }}"
+                      opacity: "{{ eff_opacity | float }}"
+                      margin_dp: "{{ edge_margin | int }}"
+                      show_toast: "{{ show_toast_flag }}"
+                      allow_multiple: false
+                      mute_audio: "{{ eff_mute }}"
                       rtsp_transport: !input rtsp_transport
                       rtsp_latency: !input rtsp_latency
                       software_decoder: !input software_decoder
@@ -835,6 +1069,8 @@ actions:
                       auto_close_on_sleep: !input auto_close_on_sleep
                       priority: "{{ eff_prio }}"
                       speak_text: "{{ eff_speak }}"
+                      cid: "{{ pip_cid }}"
+                      actions: "{{ pip_actions }}"
               - conditions:
                   - condition: template
                     value_template: "{{ selected_cam | length > 0 }}"
@@ -864,6 +1100,45 @@ actions:
                       auto_close_on_sleep: !input auto_close_on_sleep
                       priority: "{{ eff_prio }}"
                       speak_text: "{{ eff_speak }}"
+                      cid: "{{ pip_cid }}"
+                      actions: "{{ pip_actions }}"
+
+          - if:
+              - condition: template
+                value_template: >
+                  {{ is_chime and chime_unmute and chime_pause_media and ((chime_players | length) > 0) }}
+            then:
+              - variables:
+                  playing_now: "{{ chime_players | select('is_state', 'playing') | list }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ playing_now | length > 0 }}"
+                then:
+                  - action: media_player.media_pause
+                    target:
+                      entity_id: "{{ playing_now }}"
+                  - delay:
+                      seconds: "{{ eff_auto_hide | int }}"
+                  - action: media_player.media_play
+                    target:
+                      entity_id: "{{ playing_now }}"
+
+          - if:
+              - condition: template
+                value_template: "{{ enable_pip_pills and is_chime }}"
+            then:
+              - wait_for_trigger:
+                  - trigger: event
+                    event_type: quickbars.action
+                    event_data:
+                      cid: "{{ pip_cid }}"
+                timeout:
+                  seconds: "{{ eff_auto_hide | int }}"
+                continue_on_timeout: false
+              - if:
+                  - condition: template
+                    value_template: "{{ wait.trigger is not none and wait.trigger.event.data.action_id == 'doorbell_pill_1' }}"
+                then: !input doorbell_pip_action_1_actions
 
           - if:
               - condition: template
@@ -971,28 +1246,93 @@ actions:
           - event: quickbars.ping
             event_data: {}
 
-      # ── Branch C: Automatic Cinema DND On Fullscreen Playback ───────────────
+      # ── Branch B2: Debounced Live Opacity Sync (150ms Slider Protection) ────
+      - conditions:
+          - condition: trigger
+            id: opacity_sync
+          - condition: template
+            value_template: "{{ helper_sync_on }}"
+        sequence:
+          - delay:
+              milliseconds: 150
+          - event: quickbars.config
+            event_data:
+              default_opacity: >
+                {% set raw = states(opacity_helper) %}
+                {% if is_number(raw) %}
+                  {% set v = raw | float %}
+                  {{ ([([ (v / 100.0 if v > 1.0 else v), 1.0 ] | min), 0.25] | max) | round(2) }}
+                {% else %}
+                  {{ eff_opacity | float }}
+                {% endif %}
+
+      # ── Branch C: Automatic Cinema DND + Ambient Night/Playback Dimming ─────
       - conditions:
           - condition: trigger
             id: cinema_start
-          - condition: template
-            value_template: >
-              {{ cinema_dnd_on
-                 and (state_attr(trigger.entity_id, 'app_id') in cinema_app_list) }}
         sequence:
-          - action: input_boolean.turn_on
-            target:
-              entity_id: !input cinema_dnd_helper
+          - if:
+              - condition: template
+                value_template: >
+                  {{ cinema_dnd_on and (state_attr(trigger.entity_id, 'app_id') in cinema_app_list) }}
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: !input cinema_dnd_helper
+          - if:
+              - condition: template
+                value_template: "{{ ambient_dim_on }}"
+            then:
+              - action: input_number.set_value
+                target:
+                  entity_id: !input pip_opacity_helper
+                data:
+                  value: "{{ night_opacity | int }}"
 
       - conditions:
           - condition: trigger
             id: cinema_stop
-          - condition: template
-            value_template: "{{ cinema_dnd_on }}"
         sequence:
-          - action: input_boolean.turn_off
+          - if:
+              - condition: template
+                value_template: "{{ cinema_dnd_on }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: !input cinema_dnd_helper
+          - if:
+              - condition: template
+                value_template: "{{ ambient_dim_on and is_state('sun.sun', 'above_horizon') }}"
+            then:
+              - action: input_number.set_value
+                target:
+                  entity_id: !input pip_opacity_helper
+                data:
+                  value: "{{ day_opacity | int }}"
+
+      - conditions:
+          - condition: trigger
+            id: ambient_sunset
+          - condition: template
+            value_template: "{{ ambient_dim_on }}"
+        sequence:
+          - action: input_number.set_value
             target:
-              entity_id: !input cinema_dnd_helper
+              entity_id: !input pip_opacity_helper
+            data:
+              value: "{{ night_opacity | int }}"
+
+      - conditions:
+          - condition: trigger
+            id: ambient_sunrise
+          - condition: template
+            value_template: "{{ ambient_dim_on }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: !input pip_opacity_helper
+            data:
+              value: "{{ day_opacity | int }}"
 
       # ── Branch D: Shield Offline Watchdog Auto-Restart ──────────────────────
       - conditions:

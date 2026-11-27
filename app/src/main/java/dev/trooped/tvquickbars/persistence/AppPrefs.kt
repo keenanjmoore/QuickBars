@@ -201,6 +201,7 @@ object AppPrefs {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit {
             if (alias.isNullOrBlank()) remove(KEY_HA_DEVICE_ALIAS) else putString(KEY_HA_DEVICE_ALIAS, alias.trim())
         }
+        dev.trooped.tvquickbars.ha.ws.TargetMatcher.invalidateCache()
     }
 
     fun getDefaultPipOpacity(ctx: Context): Float =

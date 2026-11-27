@@ -4,7 +4,7 @@ data class CameraRequest(
     val cameraAlias: String? = null,
     val cameraEntity: String? = null,
     val position: String? = null,         // "top_left" | "top_right" | "bottom_left" | "bottom_right"
-    val size: String? = null,             // "small" | "medium" | "large"
+    val size: String? = null,             // "small" | "medium" | "large" | "fullscreen"
     val sizePxW: Int? = null,             // custom width in px (if provided)
     val sizePxH: Int? = null,             // custom height in px
     val autoHideSec: Int? = null,         // 0 = never, else seconds
@@ -20,7 +20,7 @@ data class CameraRequest(
     // ── Multi-camera & Enhanced Lifecycle Extensions ──
     val action: String? = null,            // "open" | "close" | "close_all" | "toggle"
     val slot: String? = null,              // explicit slot key or corner override
-    val layout: String? = null,            // "grid" | "side_by_side" | "stacked"
+    val layout: String? = null,            // "grid" | "side_by_side" | "stacked" | "fullscreen"
     val cameras: List<CameraRequest>? = null, // for multi-camera combined group requests
     val allowMultiple: Boolean = true,    // if true, does not clobber active cameras in other slots
 
@@ -40,7 +40,11 @@ data class CameraRequest(
     val showTimestamp: Boolean? = null,   // true = HH:mm:ss clock badge
     val showCountdownBar: Boolean? = null, // true = animated bottom auto-hide progress bar
     val snapshotEntity: String? = null,   // camera.* entity for HA camera_proxy snapshot-first
-    val speakText: String? = null         // optional Android TV TTS announcement
+    val speakText: String? = null,        // optional Android TV TTS announcement
+
+    // ── v1.7.0 Interactive Doorbell Pills ───────────────
+    val cid: String? = null,
+    val actions: List<PipAction> = emptyList()
 ) {
     init {
         require(sizePxW == null || sizePxW > 0) { "sizePxW must be positive" }

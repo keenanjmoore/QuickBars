@@ -12,8 +12,11 @@ android {
         applicationId = "dev.trooped.tvquickbars"
         minSdk = 28
         targetSdk = 35
-        versionCode = 34
-        versionName = "1.6.1"
+        versionCode = 35
+        versionName = "1.7.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
         buildConfigField("String", "REVENUECAT_API_KEY", findProperty("REVENUECAT_API_KEY") as String? ?: "\"\"")
     }
 
@@ -94,7 +97,6 @@ dependencies {
     implementation("androidx.leanback:leanback:1.0.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.fragment:fragment-ktx:1.8.1")
-    implementation("com.github.bumptech.glide:glide:4.16.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.mikepenz:material-design-iconic-typeface:2.2.0.8-kotlin")
@@ -138,4 +140,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-rtsp:1.8.0")
     implementation("androidx.media3:media3-ui:1.8.0")
     implementation("androidx.media3:media3-ui-compose:1.8.0")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

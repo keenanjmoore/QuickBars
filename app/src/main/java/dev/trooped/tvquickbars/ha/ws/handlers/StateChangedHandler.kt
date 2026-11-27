@@ -3,7 +3,6 @@ package dev.trooped.tvquickbars.ha.ws.handlers
 import dev.trooped.tvquickbars.ha.ws.HaClientBridge
 import dev.trooped.tvquickbars.utils.EntityActionExecutor
 import org.json.JSONObject
-import android.util.Log
 
 class StateChangedHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
     override fun canHandle(event: JSONObject): Boolean =
@@ -19,10 +18,9 @@ class StateChangedHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
         val newState = newStateObj?.optString("state") ?: return
         val attributes = newStateObj.optJSONObject("attributes") ?: JSONObject()
 
-        // Always update base state in cache
         EntityActionExecutor.QuickBarDataCache.updateEntityState(entityId, newState)
 
-        // Preserve your fan 'turning-on-to-target-speed' interception
+        // Preserve fan 'turning-on-to-target-speed' interception without duplicate map copies
         if (entityId.startsWith("fan.") && newState == "on") {
             val targetEntity = EntityActionExecutor.QuickBarDataCache.cachedEntities
                 .find { it.id == entityId }
@@ -32,24 +30,18 @@ class StateChangedHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
 
             if (targetSpeed != null && reportedSpeed > 0) {
                 if (reportedSpeed == targetSpeed.toInt()) {
-                    EntityActionExecutor.QuickBarDataCache.updateEntityAttributes(entityId, attributes)
                     targetEntity.lastKnownState.remove("fan_turning_on_to")
                 } else {
-                    val modified = JSONObject(attributes.toString())
+                    val modified = SubscribeEntitiesHandler.shallowCopyJson(attributes)
                     modified.put("percentage", targetSpeed.toInt())
                     EntityActionExecutor.QuickBarDataCache.updateEntityAttributes(entityId, modified)
                     ctx.listener.onEntityStateUpdated(entityId, newState, modified)
-                    ctx.listener.onEntityStateChanged(entityId, newState)
                     return
                 }
-            } else {
-                EntityActionExecutor.QuickBarDataCache.updateEntityAttributes(entityId, attributes)
             }
-        } else {
-            EntityActionExecutor.QuickBarDataCache.updateEntityAttributes(entityId, attributes)
         }
 
+        EntityActionExecutor.QuickBarDataCache.updateEntityAttributes(entityId, attributes)
         ctx.listener.onEntityStateUpdated(entityId, newState, attributes)
-        ctx.listener.onEntityStateChanged(entityId, newState)
     }
 }

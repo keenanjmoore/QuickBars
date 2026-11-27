@@ -1,10 +1,22 @@
 package dev.trooped.tvquickbars.utils
 
 import dev.trooped.tvquickbars.ui.dialog.ChangeItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.Request
+import org.json.JSONObject
+
+data class GitHubReleaseInfo(
+    val tagName: String,
+    val versionName: String,
+    val apkUrl: String?,
+    val htmlUrl: String?,
+    val notes: String
+)
 
 /**
  * Manages application versioning information, mapping internal version codes to display names
- * and maintaining a comprehensive registry of changelog entries for each release.
+ * and maintaining a comprehensive registry of changelog entries plus GitHub Release checks.
  */
 object AppUpdateManager {
     // Map of version code to version name for display
@@ -19,17 +31,82 @@ object AppUpdateManager {
         23 to "1.3.1",
         24 to "1.3.2",
         25 to "1.3.3",
-        // Add future versions here
+        26 to "1.3.4",
+        27 to "1.3.5",
+        28 to "1.3.6",
+        29 to "1.4.0",
+        30 to "1.4.1",
+        31 to "1.5.0",
+        32 to "1.5.1",
+        33 to "1.6.0",
+        34 to "1.6.1",
+        35 to "1.7.0"
     )
 
-    // Get display version name for a version code
     fun getVersionName(versionCode: Int): String {
         return versionNames[versionCode] ?: "Unknown"
     }
 
+    fun compareSemVer(remote: String, local: String): Int {
+        val rParts = remote.trim().removePrefix("v").split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+        val lParts = local.trim().removePrefix("v").split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+        val maxLen = maxOf(rParts.size, lParts.size)
+        for (i in 0 until maxLen) {
+            val r = rParts.getOrElse(i) { 0 }
+            val l = lParts.getOrElse(i) { 0 }
+            if (r != l) return r.compareTo(l)
+        }
+        return 0
+    }
+
+    suspend fun fetchLatestGitHubRelease(repo: String = "keenanjmoore/QuickBars"): GitHubReleaseInfo? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("https://api.github.com/repos/$repo/releases/latest")
+                    .header("Accept", "application/vnd.github+json")
+                    .build()
+                SharedHttpClients.base.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@runCatching null
+                    val json = JSONObject(resp.body?.string() ?: return@runCatching null)
+                    val tag = json.optString("tag_name", "").trim()
+                    if (tag.isEmpty()) return@runCatching null
+                    var apkUrl: String? = null
+                    val assets = json.optJSONArray("assets")
+                    if (assets != null) {
+                        for (i in 0 until assets.length()) {
+                            val asset = assets.optJSONObject(i) ?: continue
+                            val name = asset.optString("name", "")
+                            if (name.endsWith(".apk", ignoreCase = true)) {
+                                apkUrl = asset.optString("browser_download_url", "").takeIf { it.isNotBlank() }
+                                break
+                            }
+                        }
+                    }
+                    GitHubReleaseInfo(
+                        tagName = tag,
+                        versionName = tag.removePrefix("v"),
+                        apkUrl = apkUrl,
+                        htmlUrl = json.optString("html_url", "").takeIf { it.isNotBlank() },
+                        notes = json.optString("body", "").take(300)
+                    )
+                }
+            }.getOrNull()
+        }
+
     // Returns changes for a specific version
     fun getChangesForVersion(versionCode: Int): List<ChangeItem> {
         return when (versionCode) {
+            35 -> listOf(
+                ChangeItem(
+                    title = "v1.7.0 Stability & Speed",
+                    description = "Fixed hourly forced WS reconnects, explicit empty target_ids broadcast leaks, Notification queue deadlocks, and input_button/scene domain calls. Skips >1MB get_states dumps on reconnect and adds zero-copy adaptive MJPEG."
+                ),
+                ChangeItem(
+                    title = "Smooth PiP UX & Fallbacks",
+                    description = "Added slide+fade PiP entrance transitions, snapshot-to-live crossfade, automatic RTSP-to-MJPEG fallback after 3 failures, doorbell quick-action pills, remote focus shortcuts, and in-app GitHub Release updates."
+                )
+            )
 
             25 -> listOf(
                 ChangeItem(

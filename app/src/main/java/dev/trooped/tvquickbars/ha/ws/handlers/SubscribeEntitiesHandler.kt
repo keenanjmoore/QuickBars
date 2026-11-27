@@ -9,11 +9,15 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Handles compact Home Assistant `subscribe_entities` events (`a` added, `c` changed, `r` removed),
- * maintaining a merged local attribute snapshot per entity before dispatching updates.
+ * maintaining a merged local attribute snapshot per entity before dispatching immutable shallow snapshots.
  */
 class SubscribeEntitiesHandler : WsHandler {
 
     private val attributeCache = ConcurrentHashMap<String, JSONObject>()
+
+    fun clearCache() {
+        attributeCache.clear()
+    }
 
     override fun canHandle(event: JSONObject): Boolean =
         !event.has("event_type") && (event.has("a") || event.has("c") || event.has("r"))
@@ -28,10 +32,10 @@ class SubscribeEntitiesHandler : WsHandler {
                 ctx.knownIds += entityId
                 val state = obj.optString("s", "")
                 val attrs = obj.optJSONObject("a") ?: JSONObject()
-                val copyAttrs = JSONObject(attrs.toString())
+                val copyAttrs = shallowCopyJson(attrs)
                 attributeCache[entityId] = copyAttrs
                 if (state.isNotEmpty()) {
-                    dispatchUpdate(entityId, state, copyAttrs, ctx)
+                    dispatchUpdate(entityId, state, shallowCopyJson(copyAttrs), ctx)
                 }
             }
         }
@@ -45,7 +49,7 @@ class SubscribeEntitiesHandler : WsHandler {
                 ctx.knownIds += entityId
 
                 val existingAttrs = attributeCache[entityId]
-                    ?: HAStateStore.entitiesById.value[entityId]?.attributes?.let { JSONObject(it.toString()) }
+                    ?: HAStateStore.entitiesById.value[entityId]?.attributes?.let { shallowCopyJson(it) }
                     ?: JSONObject()
 
                 var newState: String? = null
@@ -76,7 +80,7 @@ class SubscribeEntitiesHandler : WsHandler {
                     ?: HAStateStore.entitiesById.value[entityId]?.state
                     ?: continue
 
-                dispatchUpdate(entityId, effectiveState, existingAttrs, ctx)
+                dispatchUpdate(entityId, effectiveState, shallowCopyJson(existingAttrs), ctx)
             }
         }
 
@@ -96,12 +100,23 @@ class SubscribeEntitiesHandler : WsHandler {
     private fun dispatchUpdate(
         entityId: String,
         newState: String,
-        attributes: JSONObject,
+        attributesSnapshot: JSONObject,
         ctx: HaClientBridge
     ) {
         EntityActionExecutor.QuickBarDataCache.updateEntityState(entityId, newState)
-        EntityActionExecutor.QuickBarDataCache.updateEntityAttributes(entityId, attributes)
-        ctx.listener.onEntityStateUpdated(entityId, newState, attributes)
-        ctx.listener.onEntityStateChanged(entityId, newState)
+        EntityActionExecutor.QuickBarDataCache.updateEntityAttributes(entityId, attributesSnapshot)
+        ctx.listener.onEntityStateUpdated(entityId, newState, attributesSnapshot)
+    }
+
+    internal companion object {
+        fun shallowCopyJson(src: JSONObject): JSONObject {
+            val dst = JSONObject()
+            val it = src.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                dst.put(k, src.get(k))
+            }
+            return dst
+        }
     }
 }

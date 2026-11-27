@@ -376,22 +376,12 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         }
     }
 
-    private val screenStateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(ctx: Context?, intent: Intent?) {
-            when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF, Intent.ACTION_DREAMING_STARTED -> {
-                    Log.i("QuickBarService", "Screen off / dream started -> closing auto-close camera PiPs")
-                    if (::camera.isInitialized) {
-                        camera.hideAutoCloseOverlays()
-                    }
-                    BackgroundHaConnectionManager.publishTelemetryNow(applicationContext, trigger = "screen_off")
-                }
-                Intent.ACTION_SCREEN_ON, Intent.ACTION_DREAMING_STOPPED -> {
-                    BackgroundHaConnectionManager.publishTelemetryNow(applicationContext, trigger = "screen_on")
-                }
-            }
-        }
-    }
+    private var lastBackForPipMs: Long = 0L
+    private var swallowBackPipUp: Boolean = false
+    private var swallowMenuPipUp: Boolean = false
+
+    fun getCameraController(): CameraPipController? =
+        if (::camera.isInitialized) camera else null
 
 
     companion object {
@@ -514,18 +504,7 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
 
-        val screenFilter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_SCREEN_ON)
-            addAction(Intent.ACTION_DREAMING_STARTED)
-            addAction(Intent.ACTION_DREAMING_STOPPED)
-        }
-        ContextCompat.registerReceiver(
-            this,
-            screenStateReceiver,
-            screenFilter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
+        ScreenStateMonitor.ensureRegistered(applicationContext)
 
 
         val entityActionFilter = IntentFilter("dev.trooped.tvquickbars.ENTITY_ACTION")
@@ -587,6 +566,47 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         // Restart the auto hide countdown whenever the QuickBar is visible AND we click on dpad keys.
         else if (overlayView != null){
             restartAutoHide(event)
+        } else if (::camera.isInitialized && camera.hasActivePips()) {
+            // 1b) Remote-control PiP focus shortcuts when QuickBar drawer is closed:
+            //     - Double-tap BACK (<500ms) dismisses active PiP cleanly
+            //     - MENU (if unmapped by TriggerKeys) toggles fullscreen PiP expand
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                when (event.action) {
+                    KeyEvent.ACTION_DOWN -> {
+                        val now = System.currentTimeMillis()
+                        if (now - lastBackForPipMs <= 500L) {
+                            swallowBackPipUp = true
+                            lastBackForPipMs = 0L
+                            camera.dismissMostRecentPip()
+                            return true
+                        }
+                        lastBackForPipMs = now
+                    }
+                    KeyEvent.ACTION_UP -> {
+                        if (swallowBackPipUp) {
+                            swallowBackPipUp = false
+                            return true
+                        }
+                    }
+                }
+            } else if (keyCode == KeyEvent.KEYCODE_MENU) {
+                val tkMenu = triggerKeyManager.getTriggerKey(keyCode)
+                if (tkMenu == null || !tkMenu.enabled || !tkMenu.hasAnyAssignments()) {
+                    when (event.action) {
+                        KeyEvent.ACTION_DOWN -> {
+                            swallowMenuPipUp = true
+                            return true
+                        }
+                        KeyEvent.ACTION_UP -> {
+                            if (swallowMenuPipUp) {
+                                swallowMenuPipUp = false
+                                camera.toggleExpandMostRecentPip()
+                                return true
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Never intercept confirm key pair
@@ -1900,10 +1920,6 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         } catch (_: Throwable) {}
 
         try {
-            unregisterReceiver(screenStateReceiver)
-        } catch (_: Throwable) {}
-
-        try {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(entityActionReceiver)
         } catch (e: Exception) {
             Log.e("QuickBarService", "Error unregistering entity action receiver", e)
@@ -1924,7 +1940,12 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
 
     override fun onUnbind(intent: Intent?): Boolean {
         isRunning = false
-        Log.w("QuickBarService", "Service unbound (onUnbind)")
+        serviceInstance = null
+        Log.w("QuickBarService", "Service unbound (onUnbind) -> releasing overlays so fallback manager can take over")
+        try { hideOverlay(immediate = true) } catch (_: Throwable) {}
+        if (::camera.isInitialized) {
+            try { camera.hideAll() } catch (_: Throwable) {}
+        }
         return super.onUnbind(intent)
     }
 

@@ -48,6 +48,7 @@ class NotificationController(
 
     private val notificationQueue: ArrayDeque<NotificationSpec> = ArrayDeque()
     private var isNotificationShowing: Boolean = false
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // ====== lifecycle hooks ======
     fun onServiceConnected() {
@@ -65,6 +66,8 @@ class NotificationController(
         // stop audio
         notificationPlayer?.let { try { it.stop() } catch (_: Throwable) {}; try { it.release() } catch (_: Throwable) {} }
         notificationPlayer = null
+        notificationLoudness?.let { try { it.release() } catch (_: Throwable) {} }
+        notificationLoudness = null
         notificationLoudness?.let { try { it.release() } catch (_: Throwable) {} }
         notificationLoudness = null
 
@@ -132,7 +135,11 @@ class NotificationController(
 
     @MainThread
     private fun show(spec: NotificationSpec) {
-        if (!android.provider.Settings.canDrawOverlays(context)) return
+        if (!android.provider.Settings.canDrawOverlays(context)) {
+            Log.w("NotificationController", "Cannot show notification: overlay permission missing")
+            onNotificationHidden()
+            return
+        }
 
         val themed = ContextThemeWrapper(context, R.style.Theme_HAQuickBars)
         val view = ComposeView(themed).apply {
@@ -149,6 +156,7 @@ class NotificationController(
         } catch (t: Throwable) {
             Log.e("NotificationController", "addView(notification) failed", t)
             notificationOverlay = null
+            onNotificationHidden()
             return
         }
 
@@ -187,9 +195,9 @@ class NotificationController(
         notificationHideHandler?.removeCallbacksAndMessages(null)
         val timeoutSec = (spec.durationSec ?: 6).coerceIn(1, 120)
         val timeoutMs = timeoutSec * 1000L
-        notificationHideHandler = Handler(Looper.getMainLooper()).also { h ->
-            h.postDelayed({ hideNotification() }, timeoutMs)
-        }
+        mainHandler.removeCallbacksAndMessages(null)
+        mainHandler.postDelayed({ hideNotification() }, timeoutMs)
+        notificationHideHandler = mainHandler
 
         // optional sound (fire-and-forget)
         playNotificationSound(spec.soundUrl, spec.soundVolumePercent)
@@ -203,6 +211,8 @@ class NotificationController(
         // stop audio
         notificationPlayer?.let { try { it.stop() } catch (_: Throwable) {}; try { it.release() } catch (_: Throwable) {} }
         notificationPlayer = null
+        notificationLoudness?.let { try { it.release() } catch (_: Throwable) {} }
+        notificationLoudness = null
 
         val v = notificationOverlay ?: run {
             onNotificationHidden()

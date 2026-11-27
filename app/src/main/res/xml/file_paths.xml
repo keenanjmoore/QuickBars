@@ -4,4 +4,5 @@
     <external-path name="documents" path="Documents" />
     <external-path name="downloads" path="Download" />
     <external-files-path name="backups" path="backups/" />
+    <cache-path name="updates" path="updates/" />
 </paths>

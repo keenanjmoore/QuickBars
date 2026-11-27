@@ -1,5 +1,6 @@
 package dev.trooped.tvquickbars.background
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
@@ -28,6 +29,7 @@ import dev.trooped.tvquickbars.notification.NotificationSpec
 import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import dev.trooped.tvquickbars.services.QuickBarService
 import dev.trooped.tvquickbars.ui.EntityIconMapper
+import dev.trooped.tvquickbars.utils.EntityActionExecutor
 import dev.trooped.tvquickbars.utils.EntityStateKeys
 import dev.trooped.tvquickbars.utils.EntityStateUtils
 import kotlinx.coroutines.*
@@ -35,8 +37,10 @@ import kotlinx.coroutines.flow.filterNot
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 import kotlin.random.Random
 
@@ -77,6 +81,10 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
     private val DISK_SAVE_DEBOUNCE_MS = 5000L
 
     private var lastSuccessfulConnectionTime = 0L
+    private val wsReconnectCount = AtomicInteger(0)
+    @Volatile private var lastCameraTitle: String = ""
+    @Volatile private var savedEntitiesMgr: SavedEntitiesManager? = null
+    @Volatile private var lastPublishedOpacity: Float = -1f
 
     private var cleanupJob: Job? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -90,6 +98,23 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
      */
     fun getLastSuccessfulConnectionTime(): Long {
         return lastSuccessfulConnectionTime
+    }
+
+    fun touchLastSuccessfulConnectionTime() {
+        lastSuccessfulConnectionTime = System.currentTimeMillis()
+    }
+
+    fun getWsReconnectCount(): Int = wsReconnectCount.get()
+
+    fun setLastCameraTitle(title: String) {
+        if (title.isNotBlank()) {
+            lastCameraTitle = title
+        }
+    }
+
+    private fun getSavedEntitiesManager(ctx: Context): SavedEntitiesManager {
+        savedEntitiesMgr?.let { return it }
+        return SavedEntitiesManager(ctx.applicationContext).also { savedEntitiesMgr = it }
     }
 
 
@@ -192,6 +217,9 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                 when (state) {
                     is ConnectionState.Connected -> {
                         lastSuccessfulConnectionTime = System.currentTimeMillis()
+                        if (reconnectCount > 1) {
+                            wsReconnectCount.incrementAndGet()
+                        }
                         Log.d(TAG, "Successfully connected to HA!")
                         HAStateStore.setConnection(state)
                         backoffSec = 1
@@ -272,8 +300,15 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
         val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val displayOn = pm?.isInteractive ?: true
         val activePips = HAStateStore.activePipIds.value
-        val activeArr = org.json.JSONArray()
+        val activeArr = JSONArray()
         activePips.forEach { activeArr.put(it) }
+
+        val freeRamMb = runCatching {
+            val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val mi = ActivityManager.MemoryInfo()
+            am?.getMemoryInfo(mi)
+            (mi.availMem / (1024L * 1024L)).toInt()
+        }.getOrDefault(0)
 
         val payload = JSONObject().apply {
             put("app_id", AppIdProvider.get(ctx))
@@ -292,6 +327,9 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             put("default_auto_hide", AppPrefs.getDefaultCameraAutoHideSeconds(ctx))
             put("pip_max_slots", AppPrefs.getPipMaxSlots(ctx))
             put("default_opacity", AppPrefs.getDefaultPipOpacity(ctx).toDouble())
+            put("last_camera", lastCameraTitle)
+            put("free_ram_mb", freeRamMb)
+            put("ws_reconnects", wsReconnectCount.get())
             put("rtsp_latency", AppPrefs.getRtspLatencyMode(ctx) ?: "auto")
             put("display_on", displayOn)
             put("active_pip_count", activePips.size)
@@ -301,6 +339,65 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             put("uptime_sec", SystemClock.elapsedRealtime() / 1000L)
         }
         c.fireEvent("quickbars.telemetry", payload)
+    }
+
+    /** Publishes structured runtime diagnostics (active slots, codecs, RAM, recent errors) to HA. */
+    fun publishDiagnosticsNow(ctx: Context) {
+        val c = client ?: return
+        if (!c.isConnected()) return
+        mainHandler.post {
+            val controller = QuickBarService.serviceInstance?.getCameraController() ?: fallbackCamera
+            val diag = controller?.getDiagnosticsSnapshot()
+            val mi = ActivityManager.MemoryInfo()
+            (ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.getMemoryInfo(mi)
+
+            val payload = JSONObject().apply {
+                put("app_id", AppIdProvider.get(ctx))
+                put("device_name", TargetMatcher.getDeviceName(ctx))
+                put("version", BuildConfig.VERSION_NAME)
+                put("version_code", BuildConfig.VERSION_CODE)
+                put("a11y_bound", QuickBarService.serviceInstance != null)
+                put("free_ram_mb", (mi.availMem / (1024L * 1024L)).toInt())
+                put("total_ram_mb", (mi.totalMem / (1024L * 1024L)).toInt())
+                put("ws_reconnects", wsReconnectCount.get())
+                put("active_slots", JSONArray(diag?.activeSlots ?: emptyList<String>()))
+                put("codecs", JSONObject(diag?.codecs ?: emptyMap<String, String>()))
+                put("recent_errors", JSONArray(diag?.recentErrors ?: emptyList<String>()))
+            }
+            scope.launch {
+                c.fireEvent("quickbars.diagnostics_result", payload)
+            }
+        }
+    }
+
+    fun handleRemoteFocus(action: String) {
+        mainHandler.post {
+            val svcCam = QuickBarService.serviceInstance?.getCameraController()
+            val cam = if (svcCam != null && svcCam.hasActivePips()) svcCam else fallbackCamera
+            when (action.lowercase()) {
+                "dismiss", "close" -> cam?.dismissMostRecentPip()
+                "expand", "toggle_fullscreen", "fullscreen" -> cam?.toggleExpandMostRecentPip()
+                "cycle", "rotate", "move" -> cam?.cycleActivePipCorner()
+                "close_all" -> {
+                    svcCam?.hideAll()
+                    fallbackCamera?.hideAll()
+                }
+            }
+        }
+    }
+
+    fun fireQuickbarsAction(ctx: Context, cid: String?, actionId: String, label: String? = null) {
+        val c = client ?: return
+        val data = JSONObject().apply {
+            put("cid", cid ?: "")
+            put("action_id", actionId)
+            if (!label.isNullOrBlank()) put("label", label)
+            val myId = AppIdProvider.get(ctx)
+            if (myId.isNotBlank()) put("id", myId)
+        }
+        scope.launch {
+            c.fireEvent("quickbars.action", data)
+        }
     }
 
     private suspend fun delayWithBackoff() {
@@ -314,49 +411,71 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
         HAStateStore.setCategories(categories)
     }
     override fun onEntityStateUpdated(entityId: String, newState: String, attributes: JSONObject) {
-        // Get current entity from the store
-        val cur = HAStateStore.entitiesById.value[entityId]
-        if (cur != null) {
-            // Only apply throttling to non-saved entities
-            if (!cur.isSaved) {
-                // Skip rapid updates for non-saved entities
-                val now = System.currentTimeMillis()
-                val lastUpdate = updateThrottleMap[entityId] ?: 0L
+        val ctx = appCtxRef ?: client?.getContext()
 
-                if (now - lastUpdate < UPDATE_THROTTLE_MS) {
-                    return
+        // Sync QuickBars opacity slider helper directly on startup & live changes
+        if (entityId == "input_number.quickbars_pip_opacity" && ctx != null) {
+            val raw = newState.toFloatOrNull()
+            if (raw != null && !raw.isNaN()) {
+                val norm = (if (raw > 1.0f) raw / 100.0f else raw).coerceIn(0.25f, 1.0f)
+                if (kotlin.math.abs(norm - lastPublishedOpacity) >= 0.01f) {
+                    lastPublishedOpacity = norm
+                    AppPrefs.setDefaultPipOpacity(ctx, norm)
+                    applyLiveOpacityToActivePips(norm)
                 }
-
-                updateThrottleMap[entityId] = now
             }
-
-            // Create updated entity with new state and attributes
-            val updatedEntity = cur.copy(
-                state = newState,
-                attributes = attributes,
-                // IMPORTANT: Preserve these values from the original entity
-                customName = cur.customName,
-                customIconOnName = cur.customIconOnName,
-                customIconOffName = cur.customIconOffName,
-                isSelected = cur.isSelected,
-                isSaved = cur.isSaved,
-                isActionable = cur.isActionable,
-                isAvailable = cur.isAvailable,
-                lastKnownState = cur.lastKnownState,
-                pressActions = cur.pressActions,
-                defaultPressActionsApplied = cur.defaultPressActionsApplied,
-                pressTargets = cur.pressTargets,
-                requireConfirmation = cur.requireConfirmation,
-                overrideService = cur.overrideService,
-                overrideServiceData = cur.overrideServiceData
-            )
-
-            // Process special entity attributes based on domain
-            processSpecialEntityAttributes(updatedEntity)
-
-            // Update the store with processed entity
-            HAStateStore.updateEntity(entityId, updatedEntity)
         }
+
+        // Get current entity from the store (or upsert watched entities seeded by subscribe_entities)
+        val cur = HAStateStore.entitiesById.value[entityId]
+        if (cur == null) {
+            if (entityId.startsWith("camera.") ||
+                entityId.startsWith("input_boolean.quickbars_") ||
+                entityId.startsWith("input_number.quickbars_") ||
+                entityId.startsWith("input_select.quickbars_")
+            ) {
+                HAStateStore.upsertWatchedEntity(entityId, newState, attributes, isSaved = false)
+                return
+            }
+            val savedMgr = ctx?.let { getSavedEntitiesManager(it) }
+            val isSaved = savedMgr?.loadEntities()?.any { it.id == entityId } == true
+            if (isSaved) {
+                HAStateStore.upsertWatchedEntity(entityId, newState, attributes, isSaved = true)
+            }
+            return
+        }
+
+        // Only apply throttling to non-saved entities
+        if (!cur.isSaved) {
+            val now = System.currentTimeMillis()
+            val lastUpdate = updateThrottleMap[entityId] ?: 0L
+            if (now - lastUpdate < UPDATE_THROTTLE_MS) {
+                return
+            }
+            updateThrottleMap[entityId] = now
+        }
+
+        val updatedEntity = cur.copy(
+            state = newState,
+            attributes = attributes,
+            customName = cur.customName,
+            customIconOnName = cur.customIconOnName,
+            customIconOffName = cur.customIconOffName,
+            isSelected = cur.isSelected,
+            isSaved = cur.isSaved,
+            isActionable = cur.isActionable,
+            isAvailable = cur.isAvailable,
+            lastKnownState = cur.lastKnownState,
+            pressActions = cur.pressActions,
+            defaultPressActionsApplied = cur.defaultPressActionsApplied,
+            pressTargets = cur.pressTargets,
+            requireConfirmation = cur.requireConfirmation,
+            overrideService = cur.overrideService,
+            overrideServiceData = cur.overrideServiceData
+        )
+
+        processSpecialEntityAttributes(updatedEntity)
+        HAStateStore.updateEntity(entityId, updatedEntity)
     }
 
     override fun onEntityStateChanged(entityId: String, newState: String) {
@@ -472,8 +591,8 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
      * Process special entity attributes just like QuickBarOverlay does
      */
     private fun processSpecialEntityAttributes(entity: EntityItem) {
-        val context = client?.getContext() ?: return
-        val savedEntitiesManager = SavedEntitiesManager(context)
+        val context = appCtxRef ?: client?.getContext() ?: return
+        val savedEntitiesManager = getSavedEntitiesManager(context)
 
         // First, ensure entity has valid icons before any other processing
         if (entity.customIconOnName.isNullOrEmpty()) {
@@ -511,13 +630,14 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                         entity.isSaved = true
                     }
 
-                    // Debounce disk writes to at most once every 5s per entity
+                    // Debounce disk writes to at most once every 5s per entity (offloaded to scope IO)
                     if (entity.isSaved) {
                         val now = System.currentTimeMillis()
                         val prev = lastDiskSaveMap[entity.id] ?: 0L
                         if (now - prev >= DISK_SAVE_DEBOUNCE_MS) {
                             lastDiskSaveMap[entity.id] = now
-                            savedEntitiesManager.saveEntity(entity)
+                            val copyForDisk = entity.copy(lastKnownState = entity.lastKnownState.toMutableMap())
+                            scope.launch { savedEntitiesManager.saveEntity(copyForDisk) }
                         }
                     }
                 }
@@ -543,13 +663,14 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                         entity.isSaved = true
                     }
 
-                    // Debounce disk writes to at most once every 5s per entity
+                    // Debounce disk writes to at most once every 5s per entity (offloaded to scope IO)
                     if (entity.isSaved) {
                         val now = System.currentTimeMillis()
                         val prev = lastDiskSaveMap[entity.id] ?: 0L
                         if (now - prev >= DISK_SAVE_DEBOUNCE_MS) {
                             lastDiskSaveMap[entity.id] = now
-                            savedEntitiesManager.saveEntity(entity)
+                            val copyForDisk = entity.copy(lastKnownState = entity.lastKnownState.toMutableMap())
+                            scope.launch { savedEntitiesManager.saveEntity(copyForDisk) }
                         }
                     }
                 }

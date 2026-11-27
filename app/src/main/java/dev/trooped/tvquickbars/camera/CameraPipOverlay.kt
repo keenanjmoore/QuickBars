@@ -4,12 +4,18 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Parcel
 import android.os.Parcelable
+import android.text.format.DateFormat
 import android.util.Log
-import android.widget.Toast
 import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,14 +26,26 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
+import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+import androidx.media3.ui.compose.PlayerSurface
+import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
+import dev.trooped.tvquickbars.R
+import dev.trooped.tvquickbars.utils.SharedHttpClients
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -35,25 +53,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.InputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.coroutines.coroutineContext
-import androidx.compose.ui.res.colorResource
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.C
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.VideoSize
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.audio.AudioSink
-import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer
-import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
-import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
-import androidx.media3.exoplayer.rtsp.RtspMediaSource
-import androidx.media3.ui.compose.PlayerSurface
-import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
-import dev.trooped.tvquickbars.R
-import dev.trooped.tvquickbars.utils.SharedHttpClients
 
 private fun parseBorderColor(hex: String?): Color? {
     val clean = hex?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -64,15 +64,24 @@ private fun parseBorderColor(hex: String?): Color? {
     }
 }
 
+private fun appendCacheBuster(url: String, epochMs: Long): String {
+    val sep = if (url.contains('?')) '&' else '?'
+    return "${url}${sep}t=$epochMs"
+}
+
 /**
  * Composable function to display a camera Picture-in-Picture (PiP) overlay.
- * Supports single camera views as well as multi-camera split and grid arrangements.
+ * Features smooth entrance animation, snapshot->live crossfade, automatic RTSP->MJPEG fallback,
+ * zero-copy adaptive MJPEG decoding, and optional doorbell quick-action pills.
  */
 @Composable
 fun CameraPipOverlay(
     spec: CameraPipSpec,
     countdownResetKey: Long = 0L,
-    onClose: () -> Unit = {}
+    onClose: () -> Unit = {},
+    onActionClick: (PipAction) -> Unit = {},
+    onCodecActive: (String?) -> Unit = {},
+    onPlaybackError: (String) -> Unit = {}
 ) {
     val shape = RoundedCornerShape(spec.cornerRadiusDp.coerceIn(0, 24).dp)
     val borderColor = remember(spec.borderColorHex) { parseBorderColor(spec.borderColorHex) }
@@ -82,56 +91,120 @@ fun CameraPipOverlay(
         Modifier
     }
 
-    if (spec.isGroup && spec.groupSpecs.isNotEmpty()) {
-        Box(
-            modifier = Modifier
-                .requiredSize(spec.widthDp.dp, spec.heightDp.dp)
-                .clip(shape)
-                .then(borderMod)
-        ) {
-            MultiCameraPipOverlay(spec = spec, onClose = onClose)
-            PipCountdownBar(
-                spec = spec,
-                accentColor = borderColor,
-                resetKey = countdownResetKey,
-                modifier = Modifier.align(Alignment.BottomStart)
-            )
+    var entered by remember(spec.slotKey, spec.entityId) { mutableStateOf(false) }
+    LaunchedEffect(spec.slotKey, spec.entityId) {
+        entered = true
+    }
+
+    val slideFromTop = spec.cornerPosition.startsWith("TOP_")
+
+    AnimatedVisibility(
+        visible = entered,
+        enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { h ->
+            if (slideFromTop) -(h / 5) else (h / 5)
+        },
+        exit = fadeOut(tween(180)) + slideOutVertically(tween(180)) { h ->
+            if (slideFromTop) -(h / 6) else (h / 6)
         }
-    } else {
-        Box(
+    ) {
+        Column(
             modifier = Modifier
-                .requiredSize(spec.widthDp.dp, spec.heightDp.dp)
+                .width(spec.widthDp.dp)
                 .clip(shape)
                 .then(borderMod)
+                .background(Color.Black.copy(alpha = 0.88f))
         ) {
-            SingleCameraFeedView(spec)
-            PipTimestampBadge(
-                visible = spec.showTimestamp,
+            Box(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(6.dp)
-            )
-            PipCountdownBar(
-                spec = spec,
-                accentColor = borderColor,
-                resetKey = countdownResetKey,
-                modifier = Modifier.align(Alignment.BottomStart)
-            )
+                    .fillMaxWidth()
+                    .height(spec.heightDp.dp)
+            ) {
+                if (spec.isGroup && spec.groupSpecs.isNotEmpty()) {
+                    MultiCameraPipOverlay(
+                        spec = spec,
+                        onClose = onClose,
+                        onCodecActive = onCodecActive,
+                        onPlaybackError = onPlaybackError
+                    )
+                } else {
+                    SingleCameraFeedView(
+                        spec = spec,
+                        onCodecActive = onCodecActive,
+                        onPlaybackError = onPlaybackError
+                    )
+                    if (spec.showTimestamp) {
+                        PipTimestampBadge(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(6.dp)
+                        )
+                    }
+                }
+                if (spec.showCountdownBar && spec.autoHideTimeout > 0) {
+                    PipCountdownBar(
+                        autoHideTimeoutSec = spec.autoHideTimeout,
+                        accentColor = borderColor,
+                        resetKey = countdownResetKey,
+                        modifier = Modifier.align(Alignment.BottomStart)
+                    )
+                }
+            }
+
+            if (spec.actions.isNotEmpty()) {
+                PipQuickActionBar(
+                    actions = spec.actions,
+                    accentColor = borderColor ?: Color(0xFF38BDF8),
+                    onActionClick = onActionClick
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun PipTimestampBadge(
-    visible: Boolean,
-    modifier: Modifier = Modifier
+private fun PipQuickActionBar(
+    actions: List<PipAction>,
+    accentColor: Color,
+    onActionClick: (PipAction) -> Unit
 ) {
-    if (!visible) return
-    val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-    var clock by remember { mutableStateOf(fmt.format(Date())) }
-    LaunchedEffect(visible) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF0F172A).copy(alpha = 0.92f))
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        actions.take(3).forEach { act ->
+            OutlinedButton(
+                onClick = { onActionClick(act) },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                modifier = Modifier.height(28.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, accentColor.copy(alpha = 0.65f)),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = accentColor.copy(alpha = 0.16f),
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Text(
+                    text = act.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PipTimestampBadge(modifier: Modifier = Modifier) {
+    var clock by remember { mutableStateOf(DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()) }
+    LaunchedEffect(Unit) {
         while (isActive) {
-            clock = fmt.format(Date())
+            clock = DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()
             delay(1000L)
         }
     }
@@ -148,18 +221,17 @@ private fun PipTimestampBadge(
 
 @Composable
 private fun PipCountdownBar(
-    spec: CameraPipSpec,
+    autoHideTimeoutSec: Int,
     accentColor: Color?,
     resetKey: Long,
     modifier: Modifier = Modifier
 ) {
-    if (!spec.showCountdownBar || spec.autoHideTimeout <= 0) return
     val progress = remember { Animatable(1f) }
-    LaunchedEffect(spec.autoHideTimeout, resetKey) {
+    LaunchedEffect(autoHideTimeoutSec, resetKey) {
         progress.snapTo(1f)
         progress.animateTo(
             targetValue = 0f,
-            animationSpec = tween(durationMillis = spec.autoHideTimeout * 1000, easing = LinearEasing)
+            animationSpec = tween(durationMillis = autoHideTimeoutSec * 1000, easing = LinearEasing)
         )
     }
     Box(
@@ -183,10 +255,14 @@ private fun PipCountdownBar(
 @Composable
 fun MultiCameraPipOverlay(
     spec: CameraPipSpec,
-    onClose: () -> Unit = {}
+    onClose: () -> Unit = {},
+    onCodecActive: (String?) -> Unit = {},
+    onPlaybackError: (String) -> Unit = {}
 ) {
     val specs = spec.groupSpecs
     val layout = spec.groupLayout.lowercase()
+    val perTileW = if (layout == "stacked") spec.widthDp else (spec.widthDp / 2).coerceAtLeast(140)
+    val perTileH = if (layout == "side_by_side") spec.heightDp else (spec.heightDp / 2).coerceAtLeast(90)
 
     Box(
         modifier = Modifier
@@ -195,7 +271,6 @@ fun MultiCameraPipOverlay(
             .padding(4.dp)
     ) {
         when {
-            // 2 feeds side by side
             layout == "side_by_side" || (layout == "auto" && specs.size == 2) -> {
                 Row(
                     modifier = Modifier.fillMaxSize(),
@@ -208,12 +283,15 @@ fun MultiCameraPipOverlay(
                                 .fillMaxHeight()
                                 .clip(RoundedCornerShape(4.dp))
                         ) {
-                            SingleCameraFeedView(s)
+                            SingleCameraFeedView(
+                                s.copy(widthDp = perTileW, heightDp = perTileH),
+                                onCodecActive = onCodecActive,
+                                onPlaybackError = onPlaybackError
+                            )
                         }
                     }
                 }
             }
-            // 2 feeds stacked vertically
             layout == "stacked" -> {
                 Column(
                     modifier = Modifier.fillMaxSize(),
@@ -226,12 +304,15 @@ fun MultiCameraPipOverlay(
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(4.dp))
                         ) {
-                            SingleCameraFeedView(s)
+                            SingleCameraFeedView(
+                                s.copy(widthDp = perTileW, heightDp = perTileH),
+                                onCodecActive = onCodecActive,
+                                onPlaybackError = onPlaybackError
+                            )
                         }
                     }
                 }
             }
-            // Grid layout (up to 4 feeds in a 2x2 grid)
             else -> {
                 val count = specs.size
                 if (count <= 2) {
@@ -246,7 +327,11 @@ fun MultiCameraPipOverlay(
                                     .fillMaxHeight()
                                     .clip(RoundedCornerShape(4.dp))
                             ) {
-                                SingleCameraFeedView(s)
+                                SingleCameraFeedView(
+                                    s.copy(widthDp = perTileW, heightDp = perTileH),
+                                    onCodecActive = onCodecActive,
+                                    onPlaybackError = onPlaybackError
+                                )
                             }
                         }
                     }
@@ -268,7 +353,11 @@ fun MultiCameraPipOverlay(
                                         .fillMaxHeight()
                                         .clip(RoundedCornerShape(4.dp))
                                 ) {
-                                    SingleCameraFeedView(s)
+                                    SingleCameraFeedView(
+                                        s.copy(widthDp = perTileW, heightDp = perTileH),
+                                        onCodecActive = onCodecActive,
+                                        onPlaybackError = onPlaybackError
+                                    )
                                 }
                             }
                         }
@@ -285,7 +374,11 @@ fun MultiCameraPipOverlay(
                                         .fillMaxHeight()
                                         .clip(RoundedCornerShape(4.dp))
                                 ) {
-                                    SingleCameraFeedView(s)
+                                    SingleCameraFeedView(
+                                        s.copy(widthDp = perTileW, heightDp = perTileH),
+                                        onCodecActive = onCodecActive,
+                                        onPlaybackError = onPlaybackError
+                                    )
                                 }
                             }
                         }
@@ -297,7 +390,7 @@ fun MultiCameraPipOverlay(
 }
 
 @Composable
-private fun PipLiveBadge(modifier: Modifier = Modifier) {
+private fun PipLiveBadge(label: String = "LIVE", modifier: Modifier = Modifier) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
@@ -308,11 +401,11 @@ private fun PipLiveBadge(modifier: Modifier = Modifier) {
             modifier = Modifier
                 .size(6.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF4ADE80))
+                .background(if (label == "MJPEG") Color(0xFFFBBF24) else Color(0xFF4ADE80))
         )
         Spacer(Modifier.width(4.dp))
         Text(
-            text = "LIVE",
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
             color = Color.White
@@ -321,31 +414,56 @@ private fun PipLiveBadge(modifier: Modifier = Modifier) {
 }
 
 /**
- * Individual camera feed container (MJPEG or ExoPlayer).
+ * Individual camera feed container (RTSP ExoPlayer with automatic MJPEG fallback).
  */
 @Composable
-fun SingleCameraFeedView(spec: CameraPipSpec) {
+fun SingleCameraFeedView(
+    spec: CameraPipSpec,
+    onCodecActive: (String?) -> Unit = {},
+    onPlaybackError: (String) -> Unit = {}
+) {
+    val density = LocalDensity.current.density
+    val targetPxW = remember(spec.widthDp, density) { (spec.widthDp * density).toInt().coerceAtLeast(160) }
+    val targetPxH = remember(spec.heightDp, density) { (spec.heightDp * density).toInt().coerceAtLeast(90) }
+
     Box(modifier = Modifier.fillMaxSize()) {
         val isExoStream = remember(spec.url) {
             spec.url.startsWith("rtsp://", ignoreCase = true) ||
-            spec.url.contains(".m3u8", ignoreCase = true) ||
-            spec.url.endsWith(".mp4", ignoreCase = true)
+                spec.url.contains(".m3u8", ignoreCase = true) ||
+                spec.url.endsWith(".mp4", ignoreCase = true)
         }
 
-        if (isExoStream) {
+        var fallbackToMjpeg by remember(spec.url) { mutableStateOf(false) }
+
+        if (isExoStream && !fallbackToMjpeg) {
             CameraRtspView(
                 url = spec.url,
                 config = spec.rtspProfile,
                 snapshotUrl = spec.snapshotUrl,
                 authToken = spec.authToken,
                 showLiveBadge = spec.showLiveBadge,
+                canFallbackToMjpeg = !spec.fallbackMjpegUrl.isNullOrBlank(),
+                onFallbackToMjpeg = {
+                    Log.w("SingleCameraFeedView", "RTSP failed 3x for ${spec.entityId}; falling back to HA MJPEG stream")
+                    fallbackToMjpeg = true
+                },
+                onCodecActive = onCodecActive,
+                onPlaybackError = onPlaybackError,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
+            val mjpegUrl = if (fallbackToMjpeg && !spec.fallbackMjpegUrl.isNullOrBlank()) {
+                spec.fallbackMjpegUrl
+            } else {
+                spec.url
+            }
             CameraMjpegView(
-                url = spec.url,
+                url = mjpegUrl,
                 authToken = spec.authToken,
                 showLiveBadge = spec.showLiveBadge,
+                badgeLabel = if (fallbackToMjpeg) "MJPEG" else "LIVE",
+                targetPxW = targetPxW,
+                targetPxH = targetPxH,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -381,31 +499,12 @@ fun SingleCameraFeedView(spec: CameraPipSpec) {
 }
 
 enum class StreamLatency(val minBufferMs: Int, val maxBufferMs: Int, val startBufferMs: Int, val rebufferMs: Int) {
-    LOW_LATENCY(
-        minBufferMs = 500,
-        maxBufferMs = 2000,
-        startBufferMs = 500,
-        rebufferMs = 500
-    ),
-    BALANCED(
-        minBufferMs = 1000,
-        maxBufferMs = 4000,
-        startBufferMs = 1000,
-        rebufferMs = 1000
-    ),
-    HIGH_STABILITY(
-        minBufferMs = 2000,
-        maxBufferMs = 8000,
-        startBufferMs = 2000,
-        rebufferMs = 2000
-    )
+    LOW_LATENCY(minBufferMs = 500, maxBufferMs = 2000, startBufferMs = 500, rebufferMs = 500),
+    BALANCED(minBufferMs = 1000, maxBufferMs = 4000, startBufferMs = 1000, rebufferMs = 1000),
+    HIGH_STABILITY(minBufferMs = 2000, maxBufferMs = 8000, startBufferMs = 2000, rebufferMs = 2000)
 }
 
-enum class TransportProtocol {
-    AUTO,
-    TCP,
-    UDP
-}
+enum class TransportProtocol { AUTO, TCP, UDP }
 
 data class RtspProfile(
     val transport: TransportProtocol = TransportProtocol.TCP,
@@ -436,7 +535,7 @@ data class RtspProfile(
 }
 
 // ───────────────────────── Stream player (Media3) ─────────────────────────
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@OptIn(UnstableApi::class)
 @Composable
 private fun CameraRtspView(
     url: String,
@@ -444,6 +543,10 @@ private fun CameraRtspView(
     snapshotUrl: String? = null,
     authToken: String? = null,
     showLiveBadge: Boolean = true,
+    canFallbackToMjpeg: Boolean = false,
+    onFallbackToMjpeg: () -> Unit = {},
+    onCodecActive: (String?) -> Unit = {},
+    onPlaybackError: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -457,12 +560,13 @@ private fun CameraRtspView(
     var videoW by remember(url, config) { mutableStateOf(0) }
     var videoH by remember(url, config) { mutableStateOf(0) }
 
-    // Option A6: Snapshot-first PiP (show instant JPEG frame while RTSP negotiates)
+    // Cache-busted snapshot-first fetch while ExoPlayer negotiates RTSP
     LaunchedEffect(snapshotUrl, authToken) {
         if (snapshotUrl.isNullOrBlank()) return@LaunchedEffect
+        val bustedUrl = appendCacheBuster(snapshotUrl, System.currentTimeMillis())
         withContext(Dispatchers.IO) {
             try {
-                val reqBuilder = Request.Builder().url(snapshotUrl)
+                val reqBuilder = Request.Builder().url(bustedUrl)
                 if (!authToken.isNullOrBlank()) {
                     reqBuilder.header("Authorization", "Bearer $authToken")
                 }
@@ -471,11 +575,26 @@ private fun CameraRtspView(
                         val bytes = resp.body?.bytes()
                         if (bytes != null && bytes.isNotEmpty()) {
                             val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                            snapshotBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                            val prev = snapshotBmp
+                            snapshotBmp = decoded
+                            if (prev != null && prev !== decoded && !prev.isRecycled) {
+                                prev.recycle()
+                            }
                         }
                     }
                 }
             } catch (_: Throwable) {}
+        }
+    }
+
+    DisposableEffect(snapshotUrl) {
+        onDispose {
+            val bmp = snapshotBmp
+            snapshotBmp = null
+            if (bmp != null && !bmp.isRecycled) {
+                try { bmp.recycle() } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -552,14 +671,15 @@ private fun CameraRtspView(
                 .setTrackSelector(trackSelector)
                 .build().apply {
                     val attrs = androidx.media3.common.AudioAttributes.Builder()
-                        .setUsage(androidx.media3.common.C.USAGE_MEDIA)
-                        .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                         .build()
 
                     setAudioAttributes(attrs, !config.muteAudio)
                     volume = if (config.muteAudio) 0f else 1f
-                    videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+                    videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
+                    val self = this
                     addListener(object : androidx.media3.common.Player.Listener {
                         override fun onVideoSizeChanged(videoSize: VideoSize) {
                             videoW = videoSize.width
@@ -571,13 +691,28 @@ private fun CameraRtspView(
                             retryCount = 0
                             showDebug = false
                             lastError = null
-                            Log.i("CameraRtspView", "FIRST_FRAME url=$url size=${videoW}x${videoH}")
+                            val effW = if (videoW > 0) videoW else self.videoSize.width
+                            val effH = if (videoH > 0) videoH else self.videoSize.height
+                            videoW = effW
+                            videoH = effH
+                            val codecName = self.videoFormat?.codecs ?: self.videoDecoderCounters?.let {
+                                self.videoFormat?.sampleMimeType
+                            }
+                            onCodecActive(codecName ?: "h264")
+                            Log.i("CameraRtspView", "FIRST_FRAME url=$url size=${effW}x${effH}")
                         }
 
                         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                             val cause = error.cause?.message ?: "Unknown"
                             lastError = "Code: ${error.errorCodeName}\n$cause"
                             Log.e("CameraRtspView", "PLAYBACK_ERROR url=$url code=${error.errorCodeName} msg=$cause")
+                            onPlaybackError("${error.errorCodeName}: $cause")
+
+                            if (canFallbackToMjpeg && retryCount >= 2) {
+                                onFallbackToMjpeg()
+                                return
+                            }
+
                             if (retryCount < 5) {
                                 retryCount += 1
                                 isFirstFrameRendered = false
@@ -594,10 +729,18 @@ private fun CameraRtspView(
                 }
         } catch (e: Throwable) {
             lastError = "Init Fail: ${e.message}"
+            onPlaybackError("INIT_FAIL: ${e.message}")
             showDebug = true
             null
         }
     }
+
+    // Smoothly crossfade out snapshot once live video first frame renders
+    val snapshotAlpha by animateFloatAsState(
+        targetValue = if (!isFirstFrameRendered && snapshotBmp != null && !showDebug) 1f else 0f,
+        animationSpec = tween(250),
+        label = "snapshotFade"
+    )
 
     Box(modifier = modifier.background(Color.Black)) {
         if (player != null) {
@@ -607,11 +750,13 @@ private fun CameraRtspView(
                 modifier = Modifier.fillMaxSize()
             )
 
-            if (!isFirstFrameRendered && snapshotBmp != null && !showDebug) {
+            if (snapshotBmp != null && snapshotAlpha > 0.01f) {
                 Image(
                     bitmap = snapshotBmp!!.asImageBitmap(),
                     contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .alpha(snapshotAlpha),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
                 )
             } else if (!isFirstFrameRendered && snapshotBmp == null && !showDebug) {
@@ -659,8 +804,9 @@ private fun CameraRtspView(
                 )
             }
         } else {
-            androidx.compose.material3.Text(
+            Text(
                 "Stream playback unavailable",
+                color = Color.White,
                 modifier = Modifier.padding(12.dp)
             )
         }
@@ -671,7 +817,7 @@ private fun CameraRtspView(
     }
 }
 
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@OptIn(UnstableApi::class)
 @Composable
 fun DebugInfoOverlay(
     player: androidx.media3.exoplayer.ExoPlayer,
@@ -680,7 +826,7 @@ fun DebugInfoOverlay(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.7f))
+            .background(Color.Black.copy(alpha = 0.7f))
     ) {
         AndroidView(
             modifier = Modifier
@@ -707,9 +853,9 @@ fun DebugInfoOverlay(
         if (errorMessage != null) {
             Text(
                 text = "PLAYBACK FAILED\n\n$errorMessage",
-                color = androidx.compose.ui.graphics.Color.Red,
+                color = Color.Red,
                 style = MaterialTheme.typography.titleMedium,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                textAlign = TextAlign.Center,
                 modifier = Modifier.align(Alignment.Center)
             )
         }
@@ -733,7 +879,6 @@ class SoftwarePreferredCodecSelector : MediaCodecSelector {
         decoders.sortBy { decoder ->
             if (decoder.hardwareAccelerated) 1 else -1
         }
-
         return decoders
     }
 }
@@ -743,6 +888,9 @@ fun CameraMjpegView(
     url: String,
     authToken: String?,
     showLiveBadge: Boolean = true,
+    badgeLabel: String = "LIVE",
+    targetPxW: Int = 560,
+    targetPxH: Int = 316,
     modifier: Modifier = Modifier.fillMaxSize()
 ) {
     val tag = "CameraMjpegView"
@@ -753,7 +901,7 @@ fun CameraMjpegView(
     var isLoading by remember { mutableStateOf(true) }
     var loggedFirstFrame by remember(url) { mutableStateOf(false) }
 
-    LaunchedEffect(url, authToken) {
+    LaunchedEffect(url, authToken, targetPxW, targetPxH) {
         error = null
         isLoading = true
         loggedFirstFrame = false
@@ -766,44 +914,54 @@ fun CameraMjpegView(
         }
         val req = reqBuilder.build()
 
-        while (isActive) {
-            try {
-                withContext(Dispatchers.IO) {
-                    okHttp.newCall(req).execute().use { resp ->
-                        if (!resp.isSuccessful) {
-                            throw IllegalStateException("HTTP ${resp.code}: ${resp.message}")
-                        }
-                        val stream = resp.body?.byteStream() ?: throw IllegalStateException("Empty body")
-                        attempt = 0
+        try {
+            while (isActive) {
+                try {
+                    withContext(Dispatchers.IO) {
+                        okHttp.newCall(req).execute().use { resp ->
+                            if (!resp.isSuccessful) {
+                                throw IllegalStateException("HTTP ${resp.code}: ${resp.message}")
+                            }
+                            val stream = resp.body?.byteStream() ?: throw IllegalStateException("Empty body")
+                            attempt = 0
 
-                        BufferedInputStream(stream, 64 * 1024).use { bis ->
-                            readMjpegLoop(bis) { frameBytes ->
-                                val decoded = decodeMjpegFrame(frameBytes, reusableBmp)
-                                if (decoded != null) {
-                                    reusableBmp = decoded
-                                    bitmap = decoded
-                                    error = null
-                                    if (!loggedFirstFrame) {
-                                        loggedFirstFrame = true
-                                        Log.i(tag, "MJPEG_FIRST_FRAME url=$url size=${decoded.width}x${decoded.height}")
+                            BufferedInputStream(stream, 64 * 1024).use { bis ->
+                                readMjpegLoop(bis, minFrameIntervalMs = 85L) { buf, offset, len ->
+                                    val decoded = decodeMjpegFrame(buf, offset, len, targetPxW, targetPxH, reusableBmp)
+                                    if (decoded != null) {
+                                        reusableBmp = decoded
+                                        bitmap = decoded
+                                        error = null
+                                        if (!loggedFirstFrame) {
+                                            loggedFirstFrame = true
+                                            Log.i(tag, "MJPEG_FIRST_FRAME url=$url size=${decoded.width}x${decoded.height}")
+                                        }
+                                        if (isLoading) isLoading = false
                                     }
-                                    if (isLoading) isLoading = false
                                 }
                             }
                         }
                     }
+                } catch (t: Throwable) {
+                    if (!isActive) break
+                    attempt += 1
+                    Log.w(tag, "MJPEG stream dropped (attempt $attempt): ${t.message}")
+                    if (attempt > 5) {
+                        error = t.message ?: "Stream error"
+                        isLoading = false
+                        break
+                    }
+                    delay((1000L shl minOf(attempt - 1, 3)).coerceAtMost(8000L))
                 }
-            } catch (t: Throwable) {
-                if (!isActive) break
-                attempt += 1
-                Log.w(tag, "MJPEG stream dropped (attempt $attempt): ${t.message}")
-                if (attempt > 5) {
-                    error = t.message ?: "Stream error"
-                    isLoading = false
-                    break
-                }
-                delay((1000L shl minOf(attempt - 1, 3)).coerceAtMost(8000L))
             }
+        } finally {
+            bitmap = null
+            reusableBmp?.let {
+                if (!it.isRecycled) {
+                    try { it.recycle() } catch (_: Throwable) {}
+                }
+            }
+            reusableBmp = null
         }
     }
 
@@ -818,6 +976,7 @@ fun CameraMjpegView(
                 )
                 if (showLiveBadge) {
                     PipLiveBadge(
+                        label = badgeLabel,
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .padding(6.dp)
@@ -838,28 +997,54 @@ fun CameraMjpegView(
     }
 }
 
-private fun decodeMjpegFrame(frameBytes: ByteArray, reusable: Bitmap?): Bitmap? {
+private fun calculateInSampleSize(srcW: Int, srcH: Int, reqW: Int, reqH: Int): Int {
+    var inSample = 1
+    if (srcH > reqH && srcW > reqW) {
+        val halfH = srcH / 2
+        val halfW = srcW / 2
+        while ((halfH / inSample) >= reqH && (halfW / inSample) >= reqW) {
+            inSample *= 2
+        }
+    }
+    return inSample.coerceAtLeast(1)
+}
+
+private fun decodeMjpegFrame(
+    buf: ByteArray,
+    offset: Int,
+    length: Int,
+    targetPxW: Int,
+    targetPxH: Int,
+    reusable: Bitmap?
+): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(buf, offset, length, bounds)
+    val sample = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+        calculateInSampleSize(bounds.outWidth, bounds.outHeight, targetPxW, targetPxH)
+    } else {
+        if (length > 250 * 1024) 2 else 1
+    }
+
     val opts = BitmapFactory.Options().apply {
         inMutable = true
-        inSampleSize = if (frameBytes.size > 350 * 1024) 2 else 1
+        inSampleSize = sample
         if (reusable != null && !reusable.isRecycled) {
             inBitmap = reusable
         }
     }
     return try {
-        BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size, opts)
+        BitmapFactory.decodeByteArray(buf, offset, length, opts)
     } catch (_: IllegalArgumentException) {
-        // Dimensions or sample size changed: decode cleanly without inBitmap
         val fallbackOpts = BitmapFactory.Options().apply {
             inMutable = true
-            inSampleSize = opts.inSampleSize
+            inSampleSize = sample
         }
-        BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size, fallbackOpts)
+        BitmapFactory.decodeByteArray(buf, offset, length, fallbackOpts)
     }
 }
 
 /**
- * Reusable dynamic frame buffer with 4 MB safety cap avoiding OOM on corrupted streams.
+ * Reusable dynamic frame buffer supporting zero-copy direct slice decoding and in-place compaction.
  */
 private class FastFrameBuffer(initialCapacity: Int = 256 * 1024) {
     private val maxCapacity = 4 * 1024 * 1024
@@ -869,6 +1054,17 @@ private class FastFrameBuffer(initialCapacity: Int = 256 * 1024) {
 
     fun reset() {
         size = 0
+    }
+
+    fun compactFrom(startIdx: Int) {
+        if (startIdx <= 0) return
+        if (startIdx >= size) {
+            size = 0
+            return
+        }
+        val rem = size - startIdx
+        System.arraycopy(buf, startIdx, buf, 0, rem)
+        size = rem
     }
 
     fun write(source: ByteArray, offset: Int, length: Int) {
@@ -888,18 +1084,16 @@ private class FastFrameBuffer(initialCapacity: Int = 256 * 1024) {
             buf = buf.copyOf(newCap)
         }
     }
-
-    fun toByteArray(): ByteArray = buf.copyOf(size)
 }
 
 /**
- * Optimized sliding-window MJPEG stream reader: preserves leftover trailing bytes across reads,
- * extracts exact SOI..EOI frame slices, and caps emit cadence to protect UI/GC on TV boxes.
+ * Zero-copy sliding-window MJPEG stream reader: decodes frames directly from the shared buffer
+ * slice `(buf, soi, frameLen)` and shifts trailing bytes in-place without extra per-frame allocations.
  */
 private suspend fun readMjpegLoop(
     input: InputStream,
-    minFrameIntervalMs: Long = 50L,
-    onFrame: (ByteArray) -> Unit
+    minFrameIntervalMs: Long = 85L,
+    onFrame: (buf: ByteArray, offset: Int, length: Int) -> Unit
 ) {
     val readBuf = ByteArray(16 * 1024)
     val streamBuf = FastFrameBuffer(256 * 1024)
@@ -929,12 +1123,8 @@ private suspend fun readMjpegLoop(
             }
             val eoi = findMarker(streamBuf.buf, soi + 2, streamBuf.size, 0xFF, 0xD9)
             if (eoi == -1) {
-                // Trim leading noise before SOI if any
                 if (soi > 0) {
-                    val rem = streamBuf.size - soi
-                    System.arraycopy(streamBuf.buf, soi, streamBuf.buf, 0, rem)
-                    streamBuf.reset()
-                    streamBuf.write(streamBuf.buf, 0, rem)
+                    streamBuf.compactFrom(soi)
                 }
                 break
             }
@@ -942,21 +1132,12 @@ private suspend fun readMjpegLoop(
             val frameEnd = eoi + 2
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastEmitMs >= minFrameIntervalMs) {
-                val frameBytes = streamBuf.buf.copyOfRange(soi, frameEnd)
-                onFrame(frameBytes)
+                onFrame(streamBuf.buf, soi, frameEnd - soi)
                 lastEmitMs = now
             }
 
-            // Shift trailing bytes to start of streamBuf
-            val remaining = streamBuf.size - frameEnd
-            if (remaining > 0) {
-                val tail = streamBuf.buf.copyOfRange(frameEnd, streamBuf.size)
-                streamBuf.reset()
-                streamBuf.write(tail, 0, tail.size)
-            } else {
-                streamBuf.reset()
-                break
-            }
+            streamBuf.compactFrom(frameEnd)
+            if (streamBuf.size == 0) break
         }
     }
 }
