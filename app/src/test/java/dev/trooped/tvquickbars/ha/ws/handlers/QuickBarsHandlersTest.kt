@@ -164,5 +164,9 @@ class QuickBarsHandlersTest {
         assertEquals(1.00f, CameraPipController.computeFadeAlpha(1.0f, 0.20f, 0L, 25_000L), 0.001f)
         assertEquals(0.60f, CameraPipController.computeFadeAlpha(1.0f, 0.20f, 12_500L, 25_000L), 0.001f)
         assertEquals(0.20f, CameraPipController.computeFadeAlpha(1.0f, 0.20f, 25_000L, 25_000L), 0.001f)
+
+        assertEquals(0.20f, CameraPipController.computeInitialAlpha(1.0f, 0.20f, isPinned = false, autoHideTimeout = 25), 0.001f)
+        assertEquals(0.65f, CameraPipController.computeInitialAlpha(0.65f, null, isPinned = false, autoHideTimeout = 25), 0.001f)
+        assertEquals(1.00f, CameraPipController.computeInitialAlpha(1.0f, 0.20f, isPinned = true, autoHideTimeout = 25), 0.001f)
     }
 }

@@ -83,7 +83,8 @@ class CameraPipController(
         val countdownResetMs: MutableState<Long> = mutableStateOf(System.currentTimeMillis()),
         val openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
         var autoUnfocusRunnable: Runnable? = null,
-        var fadeRunnable: Runnable? = null
+        var fadeRunnable: Runnable? = null,
+        var hasRevealedFirstFrame: Boolean = false
     ) {
         val spec: CameraPipSpec get() = specState.value
     }
@@ -222,16 +223,22 @@ class CameraPipController(
         cancelFade(instance)
         instance.specState.value = instance.spec.copy(isPinned = nextPinned)
         if (nextPinned) {
+            instance.hasRevealedFirstFrame = true
             val fullAlpha = instance.spec.opacity.coerceIn(0.15f, 1.0f)
             instance.layoutParams.alpha = fullAlpha
             if (instance.view.isAttachedToWindow) {
                 runCatching { windowManager.updateViewLayout(instance.view, instance.layoutParams) }
             }
         } else {
-            if (instance.spec.autoHideTimeout > 0) {
-                mainHandler.postDelayed(instance.hideRunnable, instance.spec.autoHideTimeout * 1000L)
+            val timeout = instance.spec.autoHideTimeout
+            if (instance.hasRevealedFirstFrame) {
+                if (timeout > 0) {
+                    mainHandler.postDelayed(instance.hideRunnable, timeout * 1000L)
+                }
+                startFadeAnimatorIfNeeded(instance)
+            } else if (timeout > 0) {
+                mainHandler.postDelayed(instance.hideRunnable, (timeout + 15L) * 1000L)
             }
-            startFadeAnimatorIfNeeded(instance)
         }
         showToast(if (nextPinned) "Camera pinned" else "Camera unpinned")
     }
@@ -537,7 +544,8 @@ class CameraPipController(
             showToast("${finalSpec.title} → PIP")
         }
         BackgroundHaConnectionManager.setLastCameraTitle(finalSpec.title)
-        Log.i(TAG, "OPEN_PIP slot=$targetSlot corner=$corner entity=${finalSpec.entityId} alpha=${finalSpec.opacity} activeCount=${activeOverlays.size + if (existingSlot == null && !activeOverlays.containsKey(targetSlot)) 1 else 0}")
+        val initAlpha = computeInitialAlpha(finalSpec.opacity, finalSpec.fadeEndOpacity, finalSpec.isPinned, finalSpec.autoHideTimeout)
+        Log.i(TAG, "OPEN_PIP slot=$targetSlot corner=$corner entity=${finalSpec.entityId} alpha=${finalSpec.opacity} initAlpha=$initAlpha activeCount=${activeOverlays.size + if (existingSlot == null && !activeOverlays.containsKey(targetSlot)) 1 else 0}")
         show(finalSpec, onRetrigger = onRetrigger)
     }
 
@@ -583,18 +591,23 @@ class CameraPipController(
                     "ignore" -> return@runOnMain
                     "extend" -> {
                         mainHandler.removeCallbacks(existing.hideRunnable)
-                        existing.countdownResetMs.value = System.currentTimeMillis()
                         val newTimeout = spec.autoHideTimeout
                         existing.specState.value = existing.spec.copy(
                             autoHideTimeout = newTimeout,
                             opacity = spec.opacity,
                             fadeEndOpacity = spec.fadeEndOpacity
                         )
-                        if (newTimeout > 0) {
-                            mainHandler.postDelayed(existing.hideRunnable, newTimeout * 1000L)
+                        val waitFade = shouldDeferRevealFade(existing.spec)
+                        if (existing.hasRevealedFirstFrame || !waitFade) {
+                            existing.countdownResetMs.value = System.currentTimeMillis()
+                            if (newTimeout > 0) {
+                                mainHandler.postDelayed(existing.hideRunnable, newTimeout * 1000L)
+                            }
+                            startFadeAnimatorIfNeeded(existing)
+                        } else if (newTimeout > 0) {
+                            mainHandler.postDelayed(existing.hideRunnable, (newTimeout + 15L) * 1000L)
                         }
-                        startFadeAnimatorIfNeeded(existing)
-                        Log.d(TAG, "Extended active PiP countdown in slot $slotKey to ${newTimeout}s")
+                        Log.d(TAG, "Extended active PiP countdown in slot $slotKey to ${newTimeout}s (revealed=${existing.hasRevealedFirstFrame})")
                         return@runOnMain
                     }
                     "restart" -> hide(slotKey)
@@ -682,8 +695,7 @@ class CameraPipController(
                                             if (!codec.isNullOrBlank()) activeCodecsBySlot[slotKey] = codec
                                         },
                                         onFirstFrameMs = { ttff ->
-                                            HAStateStore.setLastTtffMs(ttff)
-                                            Log.i(TAG, "PIP_TTFF slot=$slotKey entity=${curSpec.entityId} ttffMs=$ttff")
+                                            handleFirstFrameLoaded(slotKey, ttff)
                                         },
                                         onPlaybackError = { err ->
                                             recordError(slotKey, err)
@@ -733,7 +745,7 @@ class CameraPipController(
             gravity = if (spec.isFullscreen) Gravity.CENTER else gravityForCorner(spec.cornerPosition)
             x = marginPx
             y = marginPx
-            alpha = spec.opacity.coerceIn(0.15f, 1.0f)
+            alpha = computeInitialAlpha(spec.opacity, spec.fadeEndOpacity, spec.isPinned, spec.autoHideTimeout)
         }
 
         val instance: ActivePipInstance
@@ -759,10 +771,16 @@ class CameraPipController(
         }
 
         val timeout = spec.autoHideTimeout
-        if (timeout > 0) {
-            mainHandler.postDelayed(hideRunnable, timeout * 1000L)
+        if (shouldDeferRevealFade(spec)) {
+            if (timeout > 0) {
+                mainHandler.postDelayed(hideRunnable, (timeout + 15L) * 1000L)
+            }
+        } else {
+            if (timeout > 0) {
+                mainHandler.postDelayed(hideRunnable, timeout * 1000L)
+            }
+            startFadeAnimatorIfNeeded(instance)
         }
-        startFadeAnimatorIfNeeded(instance)
     }
 
     @MainThread
@@ -993,11 +1011,7 @@ class CameraPipController(
 
     private fun applyVisualOptions(base: CameraPipSpec, req: CameraRequest): CameraPipSpec {
         val borderColor = req.borderColor?.trim()?.takeIf { it.isNotEmpty() } ?: base.borderColorHex
-        val resolvedBorderWidth = when {
-            req.borderWidthDp != null -> req.borderWidthDp.coerceIn(0, 8)
-            borderColor != null && base.borderWidthDp == 0 -> 2
-            else -> base.borderWidthDp.coerceIn(0, 8)
-        }
+        val resolvedBorderWidth = (req.borderWidthDp ?: base.borderWidthDp).coerceIn(0, 8)
         val fullscreen = req.size.equals("fullscreen", ignoreCase = true) ||
             req.layout.equals("fullscreen", ignoreCase = true) ||
             base.isFullscreen
@@ -1022,6 +1036,33 @@ class CameraPipController(
             subtitleSafe = subSafe,
             fadeEndOpacity = normFade
         )
+    }
+
+    private fun shouldDeferRevealFade(spec: CameraPipSpec): Boolean {
+        val start = spec.opacity.coerceIn(0.15f, 1.0f)
+        val end = spec.fadeEndOpacity?.coerceIn(0.15f, 1.0f) ?: return false
+        return !spec.isPinned && spec.autoHideTimeout > 0 && end < start - 0.01f
+    }
+
+    /**
+     * Reveals a fading PiP window at full `spec.opacity` (`100%`) as soon as its live feed renders
+     * its first frame, re-arms the full display countdown, and starts the fade toward `fadeEndOpacity`.
+     */
+    private fun handleFirstFrameLoaded(slotKey: String, ttffMs: Long) = runOnMain {
+        HAStateStore.setLastTtffMs(ttffMs)
+        val instance = activeOverlays[slotKey] ?: return@runOnMain
+        Log.i(TAG, "PIP_TTFF slot=$slotKey entity=${instance.spec.entityId} ttffMs=$ttffMs")
+        if (instance.hasRevealedFirstFrame) return@runOnMain
+        instance.hasRevealedFirstFrame = true
+        if (shouldDeferRevealFade(instance.spec)) {
+            mainHandler.removeCallbacks(instance.hideRunnable)
+            val timeout = instance.spec.autoHideTimeout
+            if (timeout > 0) {
+                mainHandler.postDelayed(instance.hideRunnable, timeout * 1000L)
+            }
+            instance.countdownResetMs.value = System.currentTimeMillis()
+            startFadeAnimatorIfNeeded(instance)
+        }
     }
 
     private fun cancelFade(instance: ActivePipInstance) {
@@ -1090,6 +1131,21 @@ class CameraPipController(
             if (durationMs <= 0L) return endAlpha
             val frac = (elapsedMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
             return startAlpha + (endAlpha - startAlpha) * frac
+        }
+
+        internal fun computeInitialAlpha(
+            opacity: Float,
+            fadeEndOpacity: Float?,
+            isPinned: Boolean,
+            autoHideTimeout: Int
+        ): Float {
+            val start = opacity.coerceIn(0.15f, 1.0f)
+            val end = fadeEndOpacity?.coerceIn(0.15f, 1.0f)
+            return if (!isPinned && autoHideTimeout > 0 && end != null && end < start - 0.01f) {
+                end
+            } else {
+                start
+            }
         }
 
         fun putPrefetchedSnapshot(url: String, bytes: ByteArray) {

@@ -540,6 +540,8 @@ fun SingleCameraFeedView(
                 badgeLabel = if (fallbackToMjpeg) "MJPEG" else "LIVE",
                 targetPxW = targetPxW,
                 targetPxH = targetPxH,
+                openedAtElapsedMs = openedAtElapsedMs,
+                onFirstFrameMs = onFirstFrameMs,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -1019,10 +1021,13 @@ fun CameraMjpegView(
     badgeLabel: String = "LIVE",
     targetPxW: Int = 560,
     targetPxH: Int = 316,
+    openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
+    onFirstFrameMs: (Long) -> Unit = {},
     modifier: Modifier = Modifier.fillMaxSize()
 ) {
     val tag = "CameraMjpegView"
     val okHttp = SharedHttpClients.mjpegStream
+    val latestOnFirstFrame by rememberUpdatedState(onFirstFrameMs)
 
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1062,7 +1067,9 @@ fun CameraMjpegView(
                                         error = null
                                         if (!loggedFirstFrame) {
                                             loggedFirstFrame = true
-                                            Log.i(tag, "MJPEG_FIRST_FRAME url=$url size=${decoded.width}x${decoded.height}")
+                                            val ttff = (SystemClock.elapsedRealtime() - openedAtElapsedMs).coerceAtLeast(1L)
+                                            latestOnFirstFrame(ttff)
+                                            Log.i(tag, "MJPEG_FIRST_FRAME url=$url size=${decoded.width}x${decoded.height} ttffMs=$ttff")
                                         }
                                         if (isLoading) isLoading = false
                                     }

@@ -260,7 +260,7 @@ blueprint:
             text: {}
         border_width_dp:
           name: Border Thickness (dp)
-          default: 2
+          default: 0
           selector:
             number:
               min: 0
