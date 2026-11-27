@@ -14,9 +14,11 @@ import java.util.concurrent.ConcurrentHashMap
 class SubscribeEntitiesHandler : WsHandler {
 
     private val attributeCache = ConcurrentHashMap<String, JSONObject>()
+    private val stateCache = ConcurrentHashMap<String, String>()
 
     fun clearCache() {
         attributeCache.clear()
+        stateCache.clear()
     }
 
     override fun canHandle(event: JSONObject): Boolean =
@@ -35,6 +37,7 @@ class SubscribeEntitiesHandler : WsHandler {
                 val copyAttrs = shallowCopyJson(attrs)
                 attributeCache[entityId] = copyAttrs
                 if (state.isNotEmpty()) {
+                    stateCache[entityId] = state
                     dispatchUpdate(entityId, state, shallowCopyJson(copyAttrs), ctx)
                 }
             }
@@ -77,8 +80,10 @@ class SubscribeEntitiesHandler : WsHandler {
 
                 attributeCache[entityId] = existingAttrs
                 val effectiveState = newState
+                    ?: stateCache[entityId]
                     ?: HAStateStore.entitiesById.value[entityId]?.state
                     ?: continue
+                stateCache[entityId] = effectiveState
 
                 dispatchUpdate(entityId, effectiveState, shallowCopyJson(existingAttrs), ctx)
             }
@@ -91,6 +96,7 @@ class SubscribeEntitiesHandler : WsHandler {
                 if (entityId.isNotBlank()) {
                     ctx.knownIds.remove(entityId)
                     attributeCache.remove(entityId)
+                    stateCache.remove(entityId)
                     dispatchUpdate(entityId, "unavailable", JSONObject(), ctx)
                 }
             }
