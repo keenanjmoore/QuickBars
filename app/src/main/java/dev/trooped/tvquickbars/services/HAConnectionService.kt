@@ -107,7 +107,7 @@ class HAConnectionService : LifecycleService() {
     override fun onStartCommand(intent: android.content.Intent?, flags: Int, startId: Int): Int {
         Log.d("HAConnection", "Service starting, BackgroundManager running: ${BackgroundHaConnectionManager.isRunning()}")
         super.onStartCommand(intent, flags, startId)
-        BackgroundHaConnectionManager.start(this)
+        BackgroundHaConnectionManager.start(applicationContext)
         // Stay up – if killed, system restarts us
         return START_STICKY
     }

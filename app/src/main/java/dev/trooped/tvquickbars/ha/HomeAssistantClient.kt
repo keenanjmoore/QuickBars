@@ -194,9 +194,7 @@ class HomeAssistantClient(
         val ws = webSocket
         webSocket = null
         subscribeEntitiesHandler.clearCache()
-        if (_connectionState.value !is ConnectionState.Error) {
-            _connectionState.value = ConnectionState.Disconnected
-        }
+        _connectionState.value = ConnectionState.Disconnected
         try {
             ws?.close(1000, "Client Disconnecting")
         } catch (_: Throwable) {}
@@ -242,6 +240,30 @@ class HomeAssistantClient(
      * These functions can be used without needing an instance of HomeAssistantClient.
      */
     companion object {
+        internal fun shouldUseFastReconnect(useEntitySubscription: Boolean, hasDiscoveredWatchIds: Boolean): Boolean =
+            useEntitySubscription && hasDiscoveredWatchIds
+
+        internal fun buildCallServiceMessage(
+            commandId: Int,
+            domain: String,
+            service: String,
+            entityId: String,
+            data: JSONObject? = null
+        ): JSONObject = JSONObject().apply {
+            put("id", commandId)
+            put("type", "call_service")
+            put("domain", domain)
+            put("service", service)
+            put("target", JSONObject().put("entity_id", entityId))
+            if (data != null && data.length() > 0) {
+                val serviceData = JSONObject()
+                for (key in data.keys()) {
+                    if (key != "entity_id") serviceData.put(key, data.get(key))
+                }
+                if (serviceData.length() > 0) put("service_data", serviceData)
+            }
+        }
+
         private val discoveredWatchIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
         private fun isQuickBarsWatchedHelper(id: String): Boolean =
@@ -463,26 +485,7 @@ class HomeAssistantClient(
 
         val commandId = nextCommandId.getAndIncrement()
 
-        val serviceData = JSONObject().apply {
-            // Always include entity_id in service_data for maximum compatibility
-            put("entity_id", entityId)
-            // Merge any extra data
-            if (data != null) {
-                for (key in data.keys()) {
-                    put(key, data.get(key))
-                }
-            }
-        }
-
-        val serviceCallMessage = JSONObject().apply {
-            put("id", commandId)
-            put("type", "call_service")
-            put("domain", domain)
-            put("service", service)
-            // Keep target as well (HA accepts both; safe, and future-proof for area/device targets)
-            put("target", JSONObject().put("entity_id", entityId))
-            put("service_data", serviceData)
-        }
+        val serviceCallMessage = buildCallServiceMessage(commandId, domain, service, entityId, data)
 
         val sent = webSocket?.send(serviceCallMessage.toString()) ?: false
         if (!sent) {
@@ -568,11 +571,10 @@ class HomeAssistantClient(
                     lastPongElapsedMs = android.os.SystemClock.elapsedRealtime()
                     subscribeEntitiesHandler.clearCache()
                     _connectionState.value = ConnectionState.Connected
-                    val ctx = getContext()
-                    val hasSaved = useEntitySubscription && ctx != null && SavedEntitiesManager(ctx).loadEntities().isNotEmpty()
-                    if (useEntitySubscription && discoveredWatchIds.isNotEmpty() && hasSaved) {
+                    if (shouldUseFastReconnect(useEntitySubscription, discoveredWatchIds.isNotEmpty())) {
                         // Fast reconnect path: subscribe_entities initial 'a' snapshot delivers full states
-                        // for all saved + camera + quickbars helper entities without >1MB get_states churn.
+                        // for all saved + camera + quickbars helper entities without >1MB get_states churn,
+                        // even on automation-only TVs with 0 manually saved entities.
                         knownIds.addAll(discoveredWatchIds)
                         subscribeToRelevantEntities(webSocket)
                     } else {
@@ -618,10 +620,14 @@ class HomeAssistantClient(
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             if (webSocket !== this@HomeAssistantClient.webSocket) return
-            Log.w(TAG, "websocket onClosed code=$code reason=$reason")
-            if (_connectionState.value !is ConnectionState.Error) {
-                _connectionState.value = ConnectionState.Disconnected
-            }
+            Log.w(TAG, "websocket onClosing code=$code reason=$reason")
+            _connectionState.value = ConnectionState.Disconnected
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            if (webSocket !== this@HomeAssistantClient.webSocket) return
+            Log.i(TAG, "websocket onClosed code=$code reason=$reason")
+            _connectionState.value = ConnectionState.Disconnected
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -759,7 +765,7 @@ class HomeAssistantClient(
             }
 
             // In background subscription mode, skip allocating/sorting thousands of unused entities
-            if (useEntitySubscription && savedIds.isNotEmpty() &&
+            if (useEntitySubscription &&
                 entityId !in savedIds &&
                 !isQuickBarsWatchedHelper(entityId)
             ) {

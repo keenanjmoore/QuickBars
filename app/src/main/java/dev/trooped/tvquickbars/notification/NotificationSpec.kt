@@ -19,6 +19,7 @@ data class NotificationSpec(
     val soundVolumePercent: Int?,   // 0..200 (0=mute, 100=normal, >100 boosted)
     val iconSvgDataUri: String?,    // inline SVG data URI if provided
     val cid: String?,                // correlation id echoed from HA fire
+    val priority: String? = null    // "normal" | "high" | "critical"
 )
 
 private fun JSONObject.stringOrNull(key: String): String? =
@@ -90,6 +91,7 @@ fun JSONObject.toNotificationSpec(cid: String?): NotificationSpec {
         soundUrl = soundUrl,
         iconSvgDataUri = iconModel,
         cid = cid,
-        soundVolumePercent = soundPct
+        soundVolumePercent = soundPct,
+        priority = stringOrNull("priority")
     )
 }

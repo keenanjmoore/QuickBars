@@ -44,7 +44,10 @@ data class CameraRequest(
 
     // ── v1.7.0 Interactive Doorbell Pills ───────────────
     val cid: String? = null,
-    val actions: List<PipAction> = emptyList()
+    val actions: List<PipAction> = emptyList(),
+
+    // ── v1.8.0 Subtitle-Safe Corner Avoidance ───────────
+    val subtitleSafe: Boolean? = null
 ) {
     init {
         require(sizePxW == null || sizePxW > 0) { "sizePxW must be positive" }

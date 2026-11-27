@@ -155,7 +155,8 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             snapshotEntity = obj.optString("snapshot_entity", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             speakText = obj.optString("speak_text", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             cid = obj.optString("cid", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
-            actions = parsedActions
+            actions = parsedActions,
+            subtitleSafe = if (obj.has("subtitle_safe") && !obj.isNull("subtitle_safe")) obj.optBoolean("subtitle_safe") else null
         )
     }
 }

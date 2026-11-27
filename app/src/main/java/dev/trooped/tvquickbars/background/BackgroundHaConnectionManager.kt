@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -42,6 +43,7 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.random.Random
 
 
@@ -91,6 +93,29 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
     @Volatile private var appCtxRef: Context? = null
     private var fallbackCamera: CameraPipController? = null
     private var fallbackNotifications: NotificationController? = null
+    private var lowLatencyWifiLock: WifiManager.WifiLock? = null
+
+    fun updateWifiLockForPips(ctx: Context, hasActive: Boolean) {
+        try {
+            if (hasActive) {
+                if (lowLatencyWifiLock == null) {
+                    val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                    }
+                    lowLatencyWifiLock = wm?.createWifiLock(mode, "QuickBars:PipStream")?.apply {
+                        setReferenceCounted(false)
+                    }
+                }
+                if (lowLatencyWifiLock?.isHeld == false) lowLatencyWifiLock?.acquire()
+            } else {
+                if (lowLatencyWifiLock?.isHeld == true) lowLatencyWifiLock?.release()
+            }
+        } catch (_: Throwable) {}
+    }
 
     /**
      * Returns the timestamp of the last successful connection in milliseconds since epoch.
@@ -177,6 +202,8 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             try { fallbackNotifications?.onDestroy() } catch (_: Throwable) {}
             fallbackNotifications = null
         }
+        try { if (lowLatencyWifiLock?.isHeld == true) lowLatencyWifiLock?.release() } catch (_: Throwable) {}
+        lowLatencyWifiLock = null
         HAStateStore.setConnection(ConnectionState.Disconnected)
     }
 
@@ -326,8 +353,9 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
             put("auto_dock", AppPrefs.isAutoDockEnabled(ctx))
             put("default_auto_hide", AppPrefs.getDefaultCameraAutoHideSeconds(ctx))
             put("pip_max_slots", AppPrefs.getPipMaxSlots(ctx))
-            put("default_opacity", AppPrefs.getDefaultPipOpacity(ctx).toDouble())
+            put("default_opacity", (AppPrefs.getDefaultPipOpacity(ctx) * 100f).roundToInt() / 100.0)
             put("last_camera", lastCameraTitle)
+            put("last_ttff_ms", HAStateStore.lastTtffMs)
             put("free_ram_mb", freeRamMb)
             put("ws_reconnects", wsReconnectCount.get())
             put("rtsp_latency", AppPrefs.getRtspLatencyMode(ctx) ?: "auto")
@@ -362,6 +390,7 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                 put("ws_reconnects", wsReconnectCount.get())
                 put("active_slots", JSONArray(diag?.activeSlots ?: emptyList<String>()))
                 put("codecs", JSONObject(diag?.codecs ?: emptyMap<String, String>()))
+                put("last_ttff_ms", HAStateStore.lastTtffMs)
                 put("recent_errors", JSONArray(diag?.recentErrors ?: emptyList<String>()))
             }
             scope.launch {
@@ -378,6 +407,10 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
                 "dismiss", "close" -> cam?.dismissMostRecentPip()
                 "expand", "toggle_fullscreen", "fullscreen" -> cam?.toggleExpandMostRecentPip()
                 "cycle", "rotate", "move" -> cam?.cycleActivePipCorner()
+                "pin", "toggle_pin" -> cam?.togglePinMostRecentPip()
+                "snooze", "snooze_15m" -> cam?.snoozeMostRecentPip()
+                "mute_toggle", "toggle_mute" -> cam?.toggleMuteMostRecentPip()
+                "focus_actions", "focus" -> cam?.toggleFocusActionsOnMostRecentPip()
                 "close_all" -> {
                     svcCam?.hideAll()
                     fallbackCamera?.hideAll()
@@ -386,12 +419,19 @@ object BackgroundHaConnectionManager : HomeAssistantListener {
         }
     }
 
-    fun fireQuickbarsAction(ctx: Context, cid: String?, actionId: String, label: String? = null) {
+    fun fireQuickbarsAction(
+        ctx: Context,
+        cid: String?,
+        actionId: String,
+        label: String? = null,
+        entityId: String? = null
+    ) {
         val c = client ?: return
         val data = JSONObject().apply {
             put("cid", cid ?: "")
             put("action_id", actionId)
             if (!label.isNullOrBlank()) put("label", label)
+            if (!entityId.isNullOrBlank()) put("entity_id", entityId)
             val myId = AppIdProvider.get(ctx)
             if (myId.isNotBlank()) put("id", myId)
         }

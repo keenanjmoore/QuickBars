@@ -12,12 +12,11 @@ android {
         applicationId = "dev.trooped.tvquickbars"
         minSdk = 28
         targetSdk = 35
-        versionCode = 35
-        versionName = "1.7.0"
+        versionCode = 36
+        versionName = "1.8.0"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
-        buildConfigField("String", "REVENUECAT_API_KEY", findProperty("REVENUECAT_API_KEY") as String? ?: "\"\"")
     }
 
     signingConfigs {
@@ -57,6 +56,7 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
@@ -69,14 +69,11 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
-    }
-    composeOptions{
-        kotlinCompilerExtensionVersion = "2.0.21"
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
@@ -99,18 +96,13 @@ dependencies {
     implementation("androidx.fragment:fragment-ktx:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.android.material:material:1.12.0")
-    implementation("com.mikepenz:material-design-iconic-typeface:2.2.0.8-kotlin")
     implementation("com.google.code.gson:gson:2.13.1")
     implementation(libs.androidx.constraintlayout)
-    implementation("androidx.security:security-crypto-ktx:1.1.0-beta01") // Updated to beta
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3") // Updated
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.google.zxing:core:3.5.3")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation(libs.androidx.core.animation)
-    implementation("com.google.android.flexbox:flexbox:3.0.0")
     implementation("androidx.datastore:datastore-preferences:1.1.7")
-    // ―― Crypto layer -----------------------------------------------------
-    implementation("com.google.crypto.tink:tink-android:1.18.0")
 
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:${lifecycle_version}")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:${lifecycle_version}")
@@ -120,18 +112,15 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.material:material-icons-extended")
 
-    implementation("com.revenuecat.purchases:purchases:9.1.2")
-
-    // Jetpack Compose Dependencies (Updated)
+    // Jetpack Compose Dependencies
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.activity:activity-compose:1.11.0") // This is not in the BOM, so it needs its own version.
+    implementation("androidx.activity:activity-compose:1.11.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("androidx.core:core-splashscreen:1.0.1")
-    implementation("org.jmdns:jmdns:3.6.2")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.caverock:androidsvg:1.4")
     //implementation("io.coil-kt:coil-svg:2.7.0")

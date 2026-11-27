@@ -451,6 +451,11 @@ private fun ActionRow(
     }
 }
 
+private val BASE64_PATTERN = Regex("^[A-Za-z0-9+/=\\s]+\$")
+private val SVG_WIDTH_ATTR_PATTERN = Regex("""\swidth="[^"]*"""")
+private val SVG_HEIGHT_ATTR_PATTERN = Regex("""\sheight="[^"]*"""")
+private val SVG_OPEN_TAG_PATTERN = Regex("""<svg(\s|>)""")
+
 @Composable
 private fun HeaderIcon(
     data: String,
@@ -491,7 +496,7 @@ private fun HeaderIcon(
 
                 s.startsWith("<svg", true) -> s
 
-                s.matches(Regex("^[A-Za-z0-9+/=\\s]+\$")) ->
+                s.matches(BASE64_PATTERN) ->
                     String(Base64.decode(s, android.util.Base64.DEFAULT), Charsets.UTF_8)
 
                 else -> null
@@ -583,10 +588,10 @@ private fun fetchSvgText(ctx: android.content.Context, url: String?, isHa: Boole
 // Sanitize & render via AndroidSVG
 private fun renderSvgToBitmap(svgTextIn: String, sizePx: Int, currentColorHex: String?): Bitmap? {
     return try {
-        var s = svgTextIn.replace(Regex("""\swidth="[^"]*""""), "")
-            .replace(Regex("""\sheight="[^"]*""""), "")
+        var s = svgTextIn.replace(SVG_WIDTH_ATTR_PATTERN, "")
+            .replace(SVG_HEIGHT_ATTR_PATTERN, "")
         s = s.replaceFirst(
-            Regex("""<svg(\s|>)"""),
+            SVG_OPEN_TAG_PATTERN,
             buildString {
                 append("<svg width=\"").append(sizePx).append("px\" height=\"").append(sizePx).append("px\"")
                 if (!currentColorHex.isNullOrBlank()) append(" style=\"color: ").append(currentColorHex).append('"')

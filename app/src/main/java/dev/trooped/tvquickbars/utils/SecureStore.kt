@@ -45,6 +45,7 @@ object SecureStore {
 
     @Volatile private var cachedToken: String? = null
     @Volatile private var cachedUrl: String? = null
+    @Volatile private var cachedKey: SecretKey? = null
 
     /* ---------- public API ---------- */
 
@@ -110,22 +111,11 @@ object SecureStore {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (javaClass != other?.javaClass) return false
-
             other as EncryptedBlob
-
-            if (!iv.contentEquals(other.iv)) return false
-            if (!cipher.contentEquals(other.cipher)) return false
-            if (base64 != other.base64) return false
-
-            return true
+            return iv.contentEquals(other.iv) && cipher.contentEquals(other.cipher)
         }
 
-        override fun hashCode(): Int {
-            var result = iv.contentHashCode()
-            result = 31 * result + cipher.contentHashCode()
-            result = 31 * result + base64.hashCode()
-            return result
-        }
+        override fun hashCode(): Int = 31 * iv.contentHashCode() + cipher.contentHashCode()
     }
 
     /* ---------- encryption helpers ---------- */
@@ -149,9 +139,13 @@ object SecureStore {
     /* ---------- key management ---------- */
 
     private fun getOrCreateKey(ctx: Context): SecretKey {
+        cachedKey?.let { return it }
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
-        ks.getKey(KEY_ALIAS, null)?.let { return it as SecretKey }
+        (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let {
+            cachedKey = it
+            return it
+        }
 
         if (Build.VERSION.SDK_INT < 23)
             error("AES/GCM keystore keys require API 23+")
@@ -171,6 +165,7 @@ object SecureStore {
             ANDROID_KEYSTORE
         ).apply { init(spec) }
             .generateKey()
+            .also { cachedKey = it }
     }
 
 

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Choreographer
@@ -37,6 +38,12 @@ import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.services.ComposeViewLifecycleOwner
 import dev.trooped.tvquickbars.utils.QuickBarsTtsHelper
+import dev.trooped.tvquickbars.utils.SharedHttpClients
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
 
@@ -62,17 +69,22 @@ class CameraPipController(
 ) {
     private val TAG = "CameraPipController"
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val savedEntitiesManager by lazy { SavedEntitiesManager(context.applicationContext) }
 
-    private data class ActivePipInstance(
-        val slotKey: String,
-        val spec: CameraPipSpec,
+    private class ActivePipInstance(
+        var slotKey: String,
+        val specState: MutableState<CameraPipSpec>,
         val view: ComposeView,
         val layoutParams: WindowManager.LayoutParams,
         val lifecycleOwner: ComposeViewLifecycleOwner,
-        val hideRunnable: Runnable,
-        val countdownResetMs: MutableState<Long> = mutableStateOf(System.currentTimeMillis())
-    )
+        var hideRunnable: Runnable,
+        val countdownResetMs: MutableState<Long> = mutableStateOf(System.currentTimeMillis()),
+        val openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
+        var autoUnfocusRunnable: Runnable? = null
+    ) {
+        val spec: CameraPipSpec get() = specState.value
+    }
 
     private val activeOverlays = LinkedHashMap<String, ActivePipInstance>()
     private val activeCodecsBySlot = ConcurrentHashMap<String, String>()
@@ -81,6 +93,10 @@ class CameraPipController(
     private var showToastOnToggle: Boolean = true
 
     fun hasActivePips(): Boolean = activeOverlays.isNotEmpty()
+
+    fun isMostRecentExpanded(): Boolean = activeOverlays.values.lastOrNull()?.spec?.isFullscreen == true
+
+    fun mostRecentHasActions(): Boolean = activeOverlays.values.lastOrNull()?.spec?.actions?.isNotEmpty() == true
 
     fun getDiagnosticsSnapshot(): PipDiagnosticsSnapshot = PipDiagnosticsSnapshot(
         activeSlots = activeOverlays.map { (slot, inst) -> "$slot:${inst.spec.entityId}" },
@@ -102,11 +118,12 @@ class CameraPipController(
         hide(lastKey)
     }
 
-    /** Toggles fullscreen expansion on the most recently opened active PiP overlay. */
+    /** Toggles fullscreen expansion in-place with zero RTSP reconnect. */
     @MainThread
     fun toggleExpandMostRecentPip(): Unit = runOnMain {
         val lastEntry = activeOverlays.entries.lastOrNull() ?: return@runOnMain
-        val curSpec = lastEntry.value.spec
+        val instance = lastEntry.value
+        val curSpec = instance.spec
         val expand = !curSpec.isFullscreen
         val nextSize = if (expand) {
             val density = context.resources.displayMetrics.density
@@ -115,25 +132,47 @@ class CameraPipController(
             ((screenW / density) * 0.90f).roundToInt().coerceIn(320, 3840) to
                 ((screenH / density) * 0.88f).roundToInt().coerceIn(180, 2160)
         } else {
-            val factor = when {
+            when {
                 curSpec.isGroup && curSpec.groupLayout == "side_by_side" -> 280 * 2 + 8 to 158
                 curSpec.isGroup && curSpec.groupSpecs.size > 2 -> 280 * 2 + 8 to 158 * 2 + 8
                 else -> 280 to 158
             }
-            factor
         }
         val toggledSpec = curSpec.copy(
             isFullscreen = expand,
             widthDp = nextSize.first,
             heightDp = nextSize.second
         )
-        show(toggledSpec, onRetrigger = "restart")
+        instance.specState.value = toggledSpec
+
+        val lp = instance.layoutParams
+        val density = context.resources.displayMetrics.density
+        val padPx = (12f * 2f * density).roundToInt()
+        val extraActionsPx = if (toggledSpec.actions.isNotEmpty()) (40f * density).roundToInt() else 0
+        val screenW = context.resources.displayMetrics.widthPixels
+        val screenH = context.resources.displayMetrics.heightPixels
+        lp.width = ((toggledSpec.widthDp * density).roundToInt() + padPx).coerceAtMost((screenW * 0.95f).toInt())
+        lp.height = ((toggledSpec.heightDp * density).roundToInt() + padPx + extraActionsPx).coerceAtMost((screenH * 0.95f).toInt())
+        lp.gravity = if (expand) Gravity.CENTER else gravityForCorner(toggledSpec.cornerPosition)
+        val mPx = if (expand) 0 else (toggledSpec.marginDp.coerceIn(0, 64) * density).roundToInt()
+        lp.x = mPx
+        lp.y = mPx
+
+        try {
+            if (instance.view.isAttachedToWindow) {
+                windowManager.updateViewLayout(instance.view, lp)
+            }
+            Log.i(TAG, "TOGGLE_EXPAND_INPLACE slot=${instance.slotKey} fullscreen=$expand")
+        } catch (t: Throwable) {
+            Log.w(TAG, "toggleExpandMostRecentPip failed: ${t.message}")
+        }
     }
 
-    /** Moves the most recently opened PiP window cleanly to the next unoccupied screen corner. */
+    /** Moves the most recently opened PiP window cleanly to the next unoccupied screen corner and re-keys slot state. */
     @MainThread
     fun cycleActivePipCorner(): Unit = runOnMain {
         val lastEntry = activeOverlays.entries.lastOrNull() ?: return@runOnMain
+        val oldKey = lastEntry.key
         val instance = lastEntry.value
         if (instance.spec.isFullscreen) return@runOnMain
         val corners = listOf("TOP_RIGHT", "BOTTOM_RIGHT", "BOTTOM_LEFT", "TOP_LEFT")
@@ -144,22 +183,113 @@ class CameraPipController(
             ?: corners[(curIdx + 1) % corners.size]
 
         val lp = instance.layoutParams
-        lp.gravity = when (nextCorner) {
-            "TOP_RIGHT" -> Gravity.TOP or Gravity.END
-            "BOTTOM_LEFT" -> Gravity.BOTTOM or Gravity.START
-            "BOTTOM_RIGHT" -> Gravity.BOTTOM or Gravity.END
-            else -> Gravity.TOP or Gravity.START
-        }
+        lp.gravity = gravityForCorner(nextCorner)
         try {
             if (instance.view.isAttachedToWindow) {
                 windowManager.updateViewLayout(instance.view, lp)
             }
-            activeOverlays[lastEntry.key] = instance.copy(
-                spec = instance.spec.copy(cornerPosition = nextCorner)
-            )
+            if (oldKey != nextCorner && !activeOverlays.containsKey(nextCorner)) {
+                activeOverlays.remove(oldKey)
+                val codec = activeCodecsBySlot.remove(oldKey)
+                if (codec != null) activeCodecsBySlot[nextCorner] = codec
+                instance.slotKey = nextCorner
+                mainHandler.removeCallbacks(instance.hideRunnable)
+                val newHide = Runnable { hide(nextCorner) }
+                instance.hideRunnable = newHide
+                if (!instance.spec.isPinned && instance.spec.autoHideTimeout > 0) {
+                    mainHandler.postDelayed(newHide, instance.spec.autoHideTimeout * 1000L)
+                }
+                instance.specState.value = instance.spec.copy(cornerPosition = nextCorner, slotKey = nextCorner)
+                activeOverlays[nextCorner] = instance
+            } else {
+                instance.specState.value = instance.spec.copy(cornerPosition = nextCorner)
+            }
+            syncActiveTelemetry()
+            Log.i(TAG, "CYCLE_CORNER from=$oldKey to=$nextCorner")
         } catch (t: Throwable) {
             Log.w(TAG, "cycleActivePipCorner failed: ${t.message}")
         }
+    }
+
+    /** Pins or unpins the most recent PiP overlay, cancelling or restoring its auto-hide timer. */
+    @MainThread
+    fun togglePinMostRecentPip(): Unit = runOnMain {
+        val instance = activeOverlays.values.lastOrNull() ?: return@runOnMain
+        val nextPinned = !instance.spec.isPinned
+        mainHandler.removeCallbacks(instance.hideRunnable)
+        if (!nextPinned && instance.spec.autoHideTimeout > 0) {
+            mainHandler.postDelayed(instance.hideRunnable, instance.spec.autoHideTimeout * 1000L)
+        }
+        instance.specState.value = instance.spec.copy(isPinned = nextPinned)
+        showToast(if (nextPinned) "Camera pinned" else "Camera unpinned")
+    }
+
+    /** Toggles mute/unmute instantly on the active ExoPlayer without reconnecting. */
+    @MainThread
+    fun toggleMuteMostRecentPip(): Unit = runOnMain {
+        val instance = activeOverlays.values.lastOrNull() ?: return@runOnMain
+        val curSpec = instance.spec
+        val nextMute = !curSpec.rtspProfile.muteAudio
+        instance.specState.value = curSpec.copy(
+            rtspProfile = curSpec.rtspProfile.copy(muteAudio = nextMute)
+        )
+        showToast(if (nextMute) "Camera muted" else "Camera audio unmuted")
+    }
+
+    /** Snoozes alerts for the active camera via quickbars.action -> HA blueprint Branch F and closes the PiP. */
+    @MainThread
+    fun snoozeMostRecentPip(): Unit = runOnMain {
+        val instance = activeOverlays.values.lastOrNull() ?: return@runOnMain
+        val entity = instance.spec.entityId
+        BackgroundHaConnectionManager.fireQuickbarsAction(
+            ctx = context,
+            cid = instance.spec.cid ?: entity,
+            actionId = "snooze_15m",
+            label = instance.spec.title,
+            entityId = entity
+        )
+        showToast("Snoozed ${instance.spec.title} for 15m")
+        hide(instance.slotKey)
+    }
+
+    /** Temporarily grants window focus to in-PiP doorbell quick-action pills with 8s auto-release. */
+    @MainThread
+    fun toggleFocusActionsOnMostRecentPip(): Unit = runOnMain {
+        val instance = activeOverlays.values.lastOrNull() ?: return@runOnMain
+        if (instance.spec.actions.isEmpty()) return@runOnMain
+        val nextFocused = !instance.spec.actionsFocused
+        setInstanceFocusable(instance, nextFocused)
+    }
+
+    private fun setInstanceFocusable(instance: ActivePipInstance, focusable: Boolean) {
+        instance.autoUnfocusRunnable?.let { mainHandler.removeCallbacks(it) }
+        instance.autoUnfocusRunnable = null
+        val lp = instance.layoutParams
+        if (focusable) {
+            lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+            instance.view.isFocusableInTouchMode = true
+            val r = Runnable { setInstanceFocusable(instance, false) }
+            instance.autoUnfocusRunnable = r
+            mainHandler.postDelayed(r, 8000L)
+        } else {
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        }
+        try {
+            if (instance.view.isAttachedToWindow) {
+                windowManager.updateViewLayout(instance.view, lp)
+                if (focusable) instance.view.requestFocus()
+            }
+            instance.specState.value = instance.spec.copy(actionsFocused = focusable)
+        } catch (t: Throwable) {
+            Log.w(TAG, "setInstanceFocusable($focusable) failed: ${t.message}")
+        }
+    }
+
+    private fun gravityForCorner(corner: String): Int = when (corner) {
+        "TOP_RIGHT" -> Gravity.TOP or Gravity.END
+        "BOTTOM_LEFT" -> Gravity.BOTTOM or Gravity.START
+        "BOTTOM_RIGHT" -> Gravity.BOTTOM or Gravity.END
+        else -> Gravity.TOP or Gravity.START
     }
 
     /** Main entry point used by the service. */
@@ -173,7 +303,7 @@ class CameraPipController(
 
             showToastOnToggle = when (req.showToggleToast) {
                 true -> true
-                false -> triggerKeyToggle
+                false -> false
                 null -> triggerKeyToggle
             }
 
@@ -351,11 +481,21 @@ class CameraPipController(
         val existingSlot = activeOverlays.entries.firstOrNull {
             it.value.spec.entityId == baseSpec.entityId
         }?.key
-        val preferredCorner = mapCornerOverride(req.position) ?: baseSpec.cornerPosition
+        val subtitleSafe = req.subtitleSafe ?: (AppPrefs.isAutoDockEnabled(context) && HAStateStore.isFullscreenMediaApp())
+        val rawPreferredCorner = mapCornerOverride(req.position) ?: baseSpec.cornerPosition
+        val preferredCorner = if (subtitleSafe && req.position == null) {
+            when (rawPreferredCorner) {
+                "BOTTOM_RIGHT" -> "TOP_RIGHT"
+                "BOTTOM_LEFT" -> "TOP_LEFT"
+                else -> rawPreferredCorner
+            }
+        } else {
+            rawPreferredCorner
+        }
         val targetSlot = when {
             existingSlot != null -> existingSlot
             !req.slot.isNullOrBlank() -> req.slot
-            req.allowMultiple -> allocateAvailableSlot(preferredCorner)
+            req.allowMultiple -> allocateAvailableSlot(preferredCorner, subtitleSafe)
             else -> preferredCorner
         }
         val corner = mapCornerOverride(targetSlot) ?: preferredCorner
@@ -389,10 +529,15 @@ class CameraPipController(
         show(finalSpec, onRetrigger = onRetrigger)
     }
 
-    /** Finds an available corner slot, or falls back to defaultCorner. */
-    private fun allocateAvailableSlot(preferredCorner: String): String {
-        if (!activeOverlays.containsKey(preferredCorner)) {
-            return preferredCorner
+    /** Finds an available corner slot, avoiding bottom corners first when [subtitleSafe] is active. */
+    private fun allocateAvailableSlot(preferredCorner: String, subtitleSafe: Boolean = false): String {
+        val safePreferred = if (subtitleSafe && preferredCorner.startsWith("BOTTOM_")) {
+            if (preferredCorner == "BOTTOM_RIGHT") "TOP_RIGHT" else "TOP_LEFT"
+        } else {
+            preferredCorner
+        }
+        if (!activeOverlays.containsKey(safePreferred)) {
+            return safePreferred
         }
         val slots = listOf("TOP_RIGHT", "TOP_LEFT", "BOTTOM_RIGHT", "BOTTOM_LEFT")
         return slots.firstOrNull { !activeOverlays.containsKey(it) } ?: preferredCorner
@@ -456,8 +601,12 @@ class CameraPipController(
         val lifecycleOwner = ComposeViewLifecycleOwner()
         lifecycleOwner.create()
 
+        val openedAtElapsedMs = SystemClock.elapsedRealtime()
+        prefetchSnapshotAsync(spec.snapshotUrl, spec.authToken)
+
         val hideRunnable = Runnable { hide(slotKey) }
         val countdownResetMs = mutableStateOf(System.currentTimeMillis())
+        val specState = mutableStateOf(spec)
 
         val themed = ContextThemeWrapper(context, R.style.Theme_HAQuickBars)
         val view = ComposeView(themed).apply {
@@ -479,10 +628,11 @@ class CameraPipController(
                     lifecycleOwner.attachToView(this@apply)
                     setContent {
                         MaterialTheme {
-                            val align = if (spec.isFullscreen) {
+                            val curSpec = specState.value
+                            val align = if (curSpec.isFullscreen) {
                                 Alignment.Center
                             } else {
-                                when (spec.cornerPosition) {
+                                when (curSpec.cornerPosition) {
                                     "TOP_RIGHT" -> Alignment.TopEnd
                                     "BOTTOM_LEFT" -> Alignment.BottomStart
                                     "BOTTOM_RIGHT" -> Alignment.BottomEnd
@@ -492,22 +642,30 @@ class CameraPipController(
                             Box(Modifier.wrapContentSize(), contentAlignment = align) {
                                 Box(Modifier.padding(12.dp)) {
                                     CameraPipOverlay(
-                                        spec = spec,
+                                        spec = curSpec,
                                         countdownResetKey = countdownResetMs.value,
+                                        openedAtElapsedMs = openedAtElapsedMs,
                                         onClose = { hide(slotKey) },
                                         onActionClick = { act ->
                                             BackgroundHaConnectionManager.fireQuickbarsAction(
                                                 context,
-                                                spec.cid,
+                                                curSpec.cid,
                                                 act.id,
-                                                act.label
+                                                act.label,
+                                                curSpec.entityId
                                             )
-                                            if (act.id.equals("dismiss", ignoreCase = true)) {
+                                            if (act.id.equals("dismiss", ignoreCase = true) ||
+                                                act.id.equals("snooze_15m", ignoreCase = true)
+                                            ) {
                                                 hide(slotKey)
                                             }
                                         },
                                         onCodecActive = { codec ->
                                             if (!codec.isNullOrBlank()) activeCodecsBySlot[slotKey] = codec
+                                        },
+                                        onFirstFrameMs = { ttff ->
+                                            HAStateStore.setLastTtffMs(ttff)
+                                            Log.i(TAG, "PIP_TTFF slot=$slotKey entity=${curSpec.entityId} ttffMs=$ttff")
                                         },
                                         onPlaybackError = { err ->
                                             recordError(slotKey, err)
@@ -554,16 +712,7 @@ class CameraPipController(
             PixelFormat.TRANSLUCENT
         ).apply {
             windowAnimations = 0
-            gravity = if (spec.isFullscreen) {
-                Gravity.CENTER
-            } else {
-                when (spec.cornerPosition) {
-                    "TOP_RIGHT" -> Gravity.TOP or Gravity.END
-                    "BOTTOM_LEFT" -> Gravity.BOTTOM or Gravity.START
-                    "BOTTOM_RIGHT" -> Gravity.BOTTOM or Gravity.END
-                    else -> Gravity.TOP or Gravity.START
-                }
-            }
+            gravity = if (spec.isFullscreen) Gravity.CENTER else gravityForCorner(spec.cornerPosition)
             x = marginPx
             y = marginPx
             alpha = spec.opacity.coerceIn(0.25f, 1.0f)
@@ -573,16 +722,18 @@ class CameraPipController(
             windowManager.addView(view, params)
             activeOverlays[slotKey] = ActivePipInstance(
                 slotKey = slotKey,
-                spec = spec,
+                specState = specState,
                 view = view,
                 layoutParams = params,
                 lifecycleOwner = lifecycleOwner,
                 hideRunnable = hideRunnable,
-                countdownResetMs = countdownResetMs
+                countdownResetMs = countdownResetMs,
+                openedAtElapsedMs = openedAtElapsedMs
             )
             syncActiveTelemetry()
         } catch (e: Exception) {
             Log.e(TAG, "Error adding camera overlay to WindowManager for slot $slotKey", e)
+            try { view.disposeComposition() } catch (_: Throwable) {}
             try { lifecycleOwner.destroy() } catch (_: Throwable) {}
             return@runOnMain
         }
@@ -661,8 +812,30 @@ class CameraPipController(
         }
     }
 
+    private fun prefetchSnapshotAsync(snapshotUrl: String?, authToken: String?) {
+        if (snapshotUrl.isNullOrBlank()) return
+        ioScope.launch {
+            try {
+                val sep = if (snapshotUrl.contains('?')) '&' else '?'
+                val reqBuilder = Request.Builder().url("${snapshotUrl}${sep}t=${System.currentTimeMillis()}")
+                if (!authToken.isNullOrBlank()) {
+                    reqBuilder.header("Authorization", "Bearer $authToken")
+                }
+                SharedHttpClients.mediaFetch.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bytes = resp.body?.bytes()
+                        if (bytes != null && bytes.isNotEmpty()) {
+                            putPrefetchedSnapshot(snapshotUrl, bytes)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+    }
+
     private fun syncActiveTelemetry() {
         val activeIds = activeOverlays.values.map { it.spec.entityId }
+        BackgroundHaConnectionManager.updateWifiLockForPips(context, activeOverlays.isNotEmpty())
         if (activeIds == lastPublishedActiveIds) return
         lastPublishedActiveIds = activeIds
         HAStateStore.setActivePipIds(activeIds, hostKey)
@@ -673,20 +846,22 @@ class CameraPipController(
         val instance = activeOverlays.remove(slotKey) ?: return
         activeCodecsBySlot.remove(slotKey)
         mainHandler.removeCallbacks(instance.hideRunnable)
+        instance.autoUnfocusRunnable?.let { mainHandler.removeCallbacks(it) }
 
         val view = instance.view
         val owner = instance.lifecycleOwner
 
         try { owner.pause() } catch (_: Throwable) {}
-        try { view.setContent { } } catch (_: Throwable) {}
+        try { view.disposeComposition() } catch (_: Throwable) {}
 
+        // Unconditionally attempt removal so non-attached Views cannot leak a ViewRootImpl
         try {
-            if (view.isAttachedToWindow) {
-                windowManager.removeViewImmediate(view)
-            }
+            windowManager.removeViewImmediate(view)
         } catch (t: Throwable) {
-            Log.w(TAG, "removeViewImmediate failed for $slotKey, fallback to removeView", t)
-            try { windowManager.removeView(view) } catch (_: Throwable) {}
+            if (view.isAttachedToWindow) {
+                Log.w(TAG, "removeViewImmediate failed for $slotKey, fallback to removeView: ${t.message}")
+                try { windowManager.removeView(view) } catch (_: Throwable) {}
+            }
         }
         try { owner.destroy() } catch (_: Throwable) {}
         syncActiveTelemetry()
@@ -709,7 +884,8 @@ class CameraPipController(
 
     private fun buildAdhocRtspSpec(req: CameraRequest): CameraPipSpec {
         val raw = requireNotNull(req.rtspUrl) { "rtspUrl is required" }.trim()
-        val sanitized = stripGo2RtcQueryIfNeeded(sanitizeRtspUserInfo(raw))
+        val effectiveMute = req.muteAudio ?: false
+        val sanitized = formatGo2RtcUrl(sanitizeRtspUserInfo(raw), effectiveMute)
 
         val entityId = buildRtspEntityId(req.copy(rtspUrl = sanitized))
         val defaultCorner = "TOP_LEFT"
@@ -804,6 +980,7 @@ class CameraPipController(
             base.isFullscreen
         val rawOpacity = req.opacity ?: AppPrefs.getDefaultPipOpacity(context)
         val normOpacity = (if (rawOpacity > 1.0f) rawOpacity / 100.0f else rawOpacity).coerceIn(0.25f, 1.0f)
+        val subSafe = req.subtitleSafe ?: base.subtitleSafe
         return base.copy(
             borderColorHex = borderColor,
             borderWidthDp = resolvedBorderWidth,
@@ -815,56 +992,99 @@ class CameraPipController(
             showCountdownBar = req.showCountdownBar ?: base.showCountdownBar,
             isFullscreen = fullscreen,
             cid = req.cid ?: base.cid,
-            actions = if (req.actions.isNotEmpty()) req.actions else base.actions
+            actions = if (req.actions.isNotEmpty()) req.actions else base.actions,
+            priority = req.priority?.lowercase() ?: base.priority,
+            subtitleSafe = subSafe
         )
     }
 
-    private fun stripGo2RtcQueryIfNeeded(rtspUrl: String): String {
-        val u = Uri.parse(rtspUrl)
-        val q = u.query ?: return rtspUrl
-        if (u.port == 8554 && (q == "video" || q == "audio" || q == "video&audio")) {
-            return rtspUrl.substringBefore('?')
+    internal companion object {
+        private val snapshotCache = ConcurrentHashMap<String, Pair<Long, ByteArray>>()
+
+        fun putPrefetchedSnapshot(url: String, bytes: ByteArray) {
+            if (snapshotCache.size > 6) {
+                val oldest = snapshotCache.entries.minByOrNull { it.value.first }?.key
+                if (oldest != null) snapshotCache.remove(oldest)
+            }
+            snapshotCache[url] = SystemClock.elapsedRealtime() to bytes
         }
-        return rtspUrl
-    }
 
-    private fun sanitizeRtspUserInfo(url: String): String {
-        if (!url.startsWith("rtsp://", ignoreCase = true)) return url
-        val withoutScheme = url.substring(7)
-        val at = withoutScheme.lastIndexOf('@')
-        if (at <= 0) return url
+        fun consumePrefetchedSnapshot(url: String?): ByteArray? {
+            if (url.isNullOrBlank()) return null
+            val entry = snapshotCache.remove(url) ?: return null
+            return if (SystemClock.elapsedRealtime() - entry.first <= 10_000L) entry.second else null
+        }
 
-        val userInfo = withoutScheme.substring(0, at)
-        val rest = withoutScheme.substring(at + 1)
-
-        val colonIdx = userInfo.indexOf(':')
-        val userRaw = if (colonIdx >= 0) userInfo.substring(0, colonIdx) else userInfo
-        val passRaw = if (colonIdx >= 0) userInfo.substring(colonIdx + 1) else null
-
-        val userEnc = encodeUserInfoComponent(userRaw)
-        val passEnc = passRaw?.let { encodeUserInfoComponent(it) }
-
-        val rebuiltUserInfo = if (passEnc != null) "$userEnc:$passEnc" else userEnc
-        return "rtsp://$rebuiltUserInfo@$rest"
-    }
-
-    private fun encodeUserInfoComponent(s: String): String {
-        val unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-        val sb = StringBuilder(s.length * 3)
-        for (ch in s) {
-            if (unreserved.indexOf(ch) >= 0) {
-                sb.append(ch)
+        internal fun formatGo2RtcUrl(rtspUrl: String, muteAudio: Boolean): String {
+            val base = stripGo2RtcQueryIfNeeded(rtspUrl)
+            val atPort8554 = base.contains(":8554/")
+            return if (atPort8554 && muteAudio && !base.contains('?')) {
+                "$base?video"
             } else {
-                val bytes = ch.toString().toByteArray(Charsets.UTF_8)
-                for (b in bytes) {
-                    val v = b.toInt() and 0xFF
-                    sb.append('%')
-                    sb.append("0123456789ABCDEF"[v ushr 4])
-                    sb.append("0123456789ABCDEF"[v and 0x0F])
-                }
+                base
             }
         }
-        return sb.toString()
+
+        internal fun stripGo2RtcQueryIfNeeded(rtspUrl: String): String {
+            val qIdx = rtspUrl.indexOf('?')
+            if (qIdx == -1) return rtspUrl
+            val beforeQ = rtspUrl.substring(0, qIdx)
+            val q = rtspUrl.substring(qIdx + 1)
+            if (beforeQ.contains(":8554/") && (q == "video" || q == "audio" || q == "video&audio")) {
+                return beforeQ
+            }
+            return rtspUrl
+        }
+
+        internal fun sanitizeRtspUserInfo(url: String): String {
+            if (!url.startsWith("rtsp://", ignoreCase = true)) return url
+            val withoutScheme = url.substring(7)
+            val at = withoutScheme.lastIndexOf('@')
+            if (at <= 0) return url
+
+            val userInfo = withoutScheme.substring(0, at)
+            val rest = withoutScheme.substring(at + 1)
+
+            val colonIdx = userInfo.indexOf(':')
+            val userRaw = if (colonIdx >= 0) userInfo.substring(0, colonIdx) else userInfo
+            val passRaw = if (colonIdx >= 0) userInfo.substring(colonIdx + 1) else null
+
+            val userEnc = encodeUserInfoComponent(userRaw)
+            val passEnc = passRaw?.let { encodeUserInfoComponent(it) }
+
+            val rebuiltUserInfo = if (passEnc != null) "$userEnc:$passEnc" else userEnc
+            return "rtsp://$rebuiltUserInfo@$rest"
+        }
+
+        private fun isHexDigit(c: Char): Boolean =
+            c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
+
+        internal fun encodeUserInfoComponent(s: String): String {
+            val unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+            val sb = StringBuilder(s.length * 3)
+            var i = 0
+            while (i < s.length) {
+                val ch = s[i]
+                if (ch == '%' && i + 2 < s.length && isHexDigit(s[i + 1]) && isHexDigit(s[i + 2])) {
+                    sb.append(s, i, i + 3)
+                    i += 3
+                    continue
+                }
+                if (unreserved.indexOf(ch) >= 0) {
+                    sb.append(ch)
+                } else {
+                    val bytes = ch.toString().toByteArray(Charsets.UTF_8)
+                    for (b in bytes) {
+                        val v = b.toInt() and 0xFF
+                        sb.append('%')
+                        sb.append("0123456789ABCDEF"[v ushr 4])
+                        sb.append("0123456789ABCDEF"[v and 0x0F])
+                    }
+                }
+                i++
+            }
+            return sb.toString()
+        }
     }
 
     private fun buildRtspEntityId(req: CameraRequest): String {
@@ -919,8 +1139,9 @@ class CameraPipController(
         entity: EntityItem,
         req: CameraRequest
     ): CameraPipSpec {
+        val effectiveMute = req.muteAudio ?: false
         val rtsp = req.rtspUrl?.takeIf { it.isNotBlank() }?.let {
-            stripGo2RtcQueryIfNeeded(sanitizeRtspUserInfo(it))
+            formatGo2RtcUrl(sanitizeRtspUserInfo(it), effectiveMute)
         }
         val cleanBase = normalizedHaBaseUrl() ?: ""
         val authToken = SecurePrefsManager.getHAToken(context)

@@ -57,7 +57,11 @@ data class CameraPipSpec(
     val showCountdownBar: Boolean = true,
     val isFullscreen: Boolean = false,
     val cid: String? = null,
-    val actions: List<PipAction> = emptyList()
+    val actions: List<PipAction> = emptyList(),
+    val isPinned: Boolean = false,
+    val priority: String = "normal",
+    val subtitleSafe: Boolean = false,
+    val actionsFocused: Boolean = false
 ) : Parcelable {
     constructor(parcel: Parcel) : this(
         url = parcel.readString() ?: "",
@@ -91,7 +95,11 @@ data class CameraPipSpec(
         cid = parcel.readString(),
         actions = mutableListOf<PipAction>().apply {
             parcel.readTypedList(this, PipAction.CREATOR)
-        }
+        },
+        isPinned = parcel.readInt() != 0,
+        priority = parcel.readString() ?: "normal",
+        subtitleSafe = parcel.readInt() != 0,
+        actionsFocused = parcel.readInt() != 0
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -123,6 +131,10 @@ data class CameraPipSpec(
         parcel.writeInt(if (isFullscreen) 1 else 0)
         parcel.writeString(cid)
         parcel.writeTypedList(actions)
+        parcel.writeInt(if (isPinned) 1 else 0)
+        parcel.writeString(priority)
+        parcel.writeInt(if (subtitleSafe) 1 else 0)
+        parcel.writeInt(if (actionsFocused) 1 else 0)
     }
 
     override fun describeContents(): Int = 0

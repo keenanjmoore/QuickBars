@@ -40,7 +40,8 @@ object AppUpdateManager {
         32 to "1.5.1",
         33 to "1.6.0",
         34 to "1.6.1",
-        35 to "1.7.0"
+        35 to "1.7.0",
+        36 to "1.8.0"
     )
 
     fun getVersionName(versionCode: Int): String {
@@ -97,6 +98,17 @@ object AppUpdateManager {
     // Returns changes for a specific version
     fun getChangesForVersion(versionCode: Int): List<ChangeItem> {
         return when (versionCode) {
+            36 -> listOf(
+                ChangeItem(
+                    title = "v1.8.0 Speed, Memory & Stability",
+                    description = "Fixes ViewRootImpl/Native Heap leaks via compose disposal, removes unused SDK bloat (~40-60% smaller APK), fixes automation-only fast reconnect, eliminates 25s RTSP hangs & audio focus hijacks, and fixes animator_duration_scale=0 countdowns."
+                ),
+                ChangeItem(
+                    title = "Instant Fullscreen, Self-Test & Remote Controls",
+                    description = "Zero-reconnect fullscreen zoom, fixed corner cycling, lower RTSP start buffers (150ms), subtitle-safe corner avoidance, fullscreen Pin/Snooze/Mute hotkeys, and on-TV connectivity/codec self-test."
+                )
+            )
+
             35 -> listOf(
                 ChangeItem(
                     title = "v1.7.0 Stability & Speed",

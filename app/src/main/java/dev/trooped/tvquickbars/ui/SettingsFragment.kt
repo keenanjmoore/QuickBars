@@ -29,13 +29,6 @@ import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import dev.trooped.tvquickbars.data.AppIdProvider
-import com.revenuecat.purchases.CustomerInfo
-import com.revenuecat.purchases.Purchases
-import com.revenuecat.purchases.PurchasesError
-import com.revenuecat.purchases.interfaces.GetStoreProductsCallback
-import com.revenuecat.purchases.interfaces.PurchaseCallback
-import com.revenuecat.purchases.models.StoreProduct
-import com.revenuecat.purchases.models.StoreTransaction
 import dev.trooped.tvquickbars.data.CategoryItem
 import dev.trooped.tvquickbars.ha.ConnectionState
 import dev.trooped.tvquickbars.ha.HomeAssistantClient
@@ -305,12 +298,12 @@ class SettingsFragment : Fragment(), HomeAssistantListener {
         // 3. Format your string resource with the version name
         val formattedVersionString = getString(R.string.about_app_version, versionName)
 
-        // 4. Set the text and expose v1.7 PiP Controls, Diagnostics & GitHub Update panel
-        aboutVersionTextView.text = "$formattedVersionString • Tap for v1.7 Controls & Updates"
+        // 4. Set the text and expose v1.8 PiP Controls, Diagnostics & GitHub Update panel
+        aboutVersionTextView.text = "$formattedVersionString • Tap for v1.8 Controls & Updates"
         aboutVersionTextView.isFocusable = true
         aboutVersionTextView.isClickable = true
         aboutVersionTextView.setOnClickListener {
-            showQuickBarsSuiteControlsDialog(versionName ?: "1.7.0")
+            showQuickBarsSuiteControlsDialog(versionName ?: "1.8.0")
         }
 
         (aboutVersionTextView.parent as? ViewGroup)?.let { parentGroup ->
@@ -323,7 +316,7 @@ class SettingsFragment : Fragment(), HomeAssistantListener {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { topMargin = 12 }
                 setOnClickListener {
-                    showQuickBarsSuiteControlsDialog(versionName ?: "1.7.0")
+                    showQuickBarsSuiteControlsDialog(versionName ?: "1.8.0")
                 }
             }
             parentGroup.addView(controlsBtn)
@@ -340,6 +333,7 @@ class SettingsFragment : Fragment(), HomeAssistantListener {
         val connState = HAStateStore.connection.value::class.simpleName ?: "Unknown"
         val a11yBound = QuickBarService.serviceInstance != null
         val reconnects = BackgroundHaConnectionManager.getWsReconnectCount()
+        val lastTtff = HAStateStore.lastTtffMs
 
         val items = arrayOf(
             "Default PiP Opacity: $opacityPct% (Tap to cycle)",
@@ -347,12 +341,13 @@ class SettingsFragment : Fragment(), HomeAssistantListener {
             "Quiet Hours: ${if (qh) "ON" else "OFF"} (Tap to toggle)",
             "Auto-Dock in Video Apps: ${if (dock) "ON" else "OFF"} (Tap to toggle)",
             "Max Concurrent PiP Slots: $maxSlots (Tap to cycle 1-4)",
-            "Diagnostics: WS=$connState | A11y=${if (a11yBound) "Bound" else "Unbound"} | Reconnects=$reconnects (Publish Now)",
+            "Diagnostics: WS=$connState | A11y=${if (a11yBound) "Bound" else "Unbound"} | Reconnects=$reconnects | TTFF=${lastTtff}ms",
+            "Run Local Connectivity & Codec Self-Test",
             "Check GitHub Release Update (current v$currentVersion)"
         )
 
         MaterialAlertDialogBuilder(ctx)
-            .setTitle("QuickBars v1.7 Controls & Diagnostics")
+            .setTitle("QuickBars v1.8 Controls & Diagnostics")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> {
@@ -393,11 +388,63 @@ class SettingsFragment : Fragment(), HomeAssistantListener {
                         BackgroundHaConnectionManager.publishDiagnosticsNow(ctx)
                         Toast.makeText(ctx, "Published telemetry & diagnostics to Home Assistant", Toast.LENGTH_SHORT).show()
                     }
-                    6 -> checkAndDownloadReleaseUpdate(currentVersion)
+                    6 -> runLocalSelfTest()
+                    7 -> checkAndDownloadReleaseUpdate(currentVersion)
                 }
             }
             .setNegativeButton("Close", null)
             .show()
+    }
+
+    private fun runLocalSelfTest() {
+        val ctx = context ?: return
+        Toast.makeText(ctx, "Running QuickBars local self-test…", Toast.LENGTH_SHORT).show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val report = withContext(Dispatchers.IO) {
+                val haUrl = SecurePrefsManager.getHAUrl(ctx)?.trim().orEmpty()
+                val wsConnected = HAStateStore.connection.value is ConnectionState.Connected
+                val host = runCatching {
+                    val u = if (haUrl.contains("://")) haUrl else "http://$haUrl"
+                    Uri.parse(u).host
+                }.getOrNull()
+
+                val rtspReachable = if (!host.isNullOrBlank()) {
+                    val t0 = android.os.SystemClock.elapsedRealtime()
+                    val ok = runCatching {
+                        java.net.Socket().use { sock ->
+                            sock.connect(java.net.InetSocketAddress(host, 8554), 1500)
+                        }
+                        true
+                    }.getOrDefault(false)
+                    val dt = android.os.SystemClock.elapsedRealtime() - t0
+                    if (ok) "PASS (${dt}ms @ $host:8554)" else "FAIL (unreachable @ $host:8554)"
+                } else {
+                    "SKIP (no HA host)"
+                }
+
+                val hwAvc = runCatching {
+                    val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+                    list.codecInfos.any { info ->
+                        !info.isEncoder && info.isHardwareAccelerated &&
+                            info.supportedTypes.any { it.equals("video/avc", ignoreCase = true) }
+                    }
+                }.getOrDefault(false)
+
+                buildString {
+                    appendLine("• HA WebSocket: ${if (wsConnected) "PASS (Connected)" else "FAIL (${HAStateStore.connection.value})"}")
+                    appendLine("• go2rtc RTSP (8554): $rtspReachable")
+                    appendLine("• Accessibility Service: ${if (QuickBarService.serviceInstance != null) "PASS (Bound)" else "FAIL (Unbound)"}")
+                    appendLine("• HW H.264 Decoder: ${if (hwAvc) "PASS" else "WARN (SW only)"}")
+                    append("• Last Stream TTFF: ${HAStateStore.lastTtffMs} ms")
+                }
+            }
+            if (!isAdded) return@launch
+            MaterialAlertDialogBuilder(ctx)
+                .setTitle("QuickBars Local Self-Test")
+                .setMessage(report)
+                .setPositiveButton("OK", null)
+                .show()
+        }
     }
 
     private fun checkAndDownloadReleaseUpdate(currentVersion: String) {
@@ -532,48 +579,11 @@ class SettingsFragment : Fragment(), HomeAssistantListener {
 
 
     private fun purchaseDonation(productId: String) {
-        Purchases.sharedInstance.getProducts(
-            listOf(productId),
-            object : GetStoreProductsCallback {
-                override fun onReceived(storeProducts: List<StoreProduct>) {
-                    val product = storeProducts.firstOrNull()
-                    if (product != null) {
-                        Purchases.sharedInstance.purchaseProduct(
-                            requireActivity(),
-                            product,
-                            object : PurchaseCallback {
-                                override fun onCompleted(
-                                    storeTransaction: StoreTransaction,
-                                    customerInfo: CustomerInfo
-                                ) {
-                                    Toast.makeText(requireContext(), "Thank you for your support!", Toast.LENGTH_LONG).show()
-                                }
-
-                                override fun onError(error: PurchasesError, userCancelled: Boolean) {
-                                    if (!userCancelled) {
-                                        Toast.makeText(requireContext(), "Error: ${error.message}", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }
-                        )
-                    } else {
-                        Toast.makeText(
-                            requireContext(),
-                            "Donation product not available right now.",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-
-                override fun onError(error: PurchasesError) {
-                    Toast.makeText(
-                        requireContext(),
-                        "Error loading product: ${error.message}",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-        )
+        Toast.makeText(
+            requireContext(),
+            "Play Store donations are disabled in sideloaded builds.",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     /**

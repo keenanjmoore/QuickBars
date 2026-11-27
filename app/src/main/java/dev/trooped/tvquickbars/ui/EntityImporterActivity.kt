@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import dev.trooped.tvquickbars.R
 import dev.trooped.tvquickbars.data.CategoryItem
 import dev.trooped.tvquickbars.data.EntityItem
@@ -66,6 +67,8 @@ import dev.trooped.tvquickbars.persistence.AppPrefs
 import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.utils.EntityUsageUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -219,9 +222,15 @@ class EntityImporterViewModel(
         }
     }
 
+    private var searchDebounceJob: Job? = null
+
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
-        filterAndBuildList()
+        searchDebounceJob?.cancel()
+        searchDebounceJob = viewModelScope.launch(Dispatchers.Default) {
+            delay(150L)
+            filterAndBuildList()
+        }
     }
 
     override fun onEntityStateUpdated(entityId: String, newState: String, attributes: JSONObject) {

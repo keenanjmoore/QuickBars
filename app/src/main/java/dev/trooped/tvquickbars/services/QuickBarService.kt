@@ -361,6 +361,17 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
         }
     }
 
+    /** Cached enabled trigger key codes for sub-millisecond fast-path rejection in onKeyEvent. */
+    @Volatile private var enabledTriggerKeyCodes: Set<Int> = emptySet()
+
+    private fun refreshTriggerKeyCodeCache() {
+        enabledTriggerKeyCodes = triggerKeyManager.loadTriggerKeys()
+            .asSequence()
+            .filter { it.enabled && it.hasAnyAssignments() }
+            .map { it.keyCode }
+            .toHashSet()
+    }
+
     private val reloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
             if (intent?.action == "ACTION_RELOAD_TRIGGER_KEYS") {
@@ -370,6 +381,7 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
                 } else {
                     triggerKeyManager.clearCache()
                 }
+                refreshTriggerKeyCodeCache()
                 quickBarMap = quickBarManager.loadQuickBars().associateBy { it.id }
                 Log.d("QuickBarService", "Reloaded trigger keys & QuickBars (force=$force)")
             }
@@ -440,7 +452,8 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
                     triggerKeyManager.clearCache()
                 }
 
-                // Also reload QuickBars map
+                // Reload QuickBars map
+                refreshTriggerKeyCodeCache()
                 quickBarMap = quickBarManager
                     .loadQuickBars()
                     .associateBy { it.id }
@@ -479,6 +492,14 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
 
         quickBarManager = QuickBarManager(this)
         triggerKeyManager = TriggerKeyManager(this)
+        refreshTriggerKeyCodeCache()
+
+        runCatching {
+            val pkg = rootInActiveWindow?.packageName?.toString()
+            if (!pkg.isNullOrBlank() && pkg != packageName && pkg != "com.android.systemui" && pkg != "android") {
+                HAStateStore.setForegroundApp(pkg)
+            }
+        }
 
         // Load data asynchronously to avoid blocking the main thread
         serviceScope.launch(Dispatchers.IO) {
@@ -606,11 +627,39 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
                         }
                     }
                 }
+            } else if (camera.isMostRecentExpanded()) {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        if (event.action == KeyEvent.ACTION_UP) camera.togglePinMostRecentPip()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        if (event.action == KeyEvent.ACTION_UP) camera.snoozeMostRecentPip()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_VOLUME_MUTE, KeyEvent.KEYCODE_MUTE -> {
+                        if (event.action == KeyEvent.ACTION_UP) camera.toggleMuteMostRecentPip()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        if (camera.mostRecentHasActions()) {
+                            if (event.action == KeyEvent.ACTION_UP) camera.toggleFocusActionsOnMostRecentPip()
+                            return true
+                        }
+                    }
+                }
             }
         }
 
         // Never intercept confirm key pair
         if (isConfirmKey(keyCodeRaw)) {
+            return false
+        }
+
+        // Fast-path reject keys that are not mapped to any QuickBar trigger (unless in capture/swallow guards)
+        if (!isInCaptureMode && swallowSystemUntilKeyUp == -1 && swallowUntilKeyUp == -1 &&
+            keyCode !in enabledTriggerKeyCodes
+        ) {
             return false
         }
 
@@ -1698,7 +1747,7 @@ class QuickBarService : AccessibilityService(), HomeAssistantListener {
                 connectionStateJob?.cancel(); connectionStateJob = null
                 quickBarLifecycleOwner.pause()
                 if (immediate) {
-                    (v as? ComposeView)?.setContent { } // only in immediate path
+                    (v as? ComposeView)?.disposeComposition()
                 }
             } catch (_: Throwable) {
             }

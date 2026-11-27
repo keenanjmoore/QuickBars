@@ -32,6 +32,13 @@ object HAStateStore {
     private val _foregroundApp = MutableStateFlow<String?>(null)
     val foregroundApp: StateFlow<String?> = _foregroundApp
 
+    @Volatile var lastTtffMs: Long = 0L
+        private set
+
+    fun setLastTtffMs(ms: Long) {
+        if (ms > 0L) lastTtffMs = ms
+    }
+
     private val FULLSCREEN_MEDIA_PACKAGES = setOf(
         "com.plexapp.android",
         "com.netflix.ninja",

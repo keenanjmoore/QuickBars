@@ -1,7 +1,7 @@
 blueprint:
-  name: "QuickBars Smart TV Camera & Alert Suite (v1.7)"
+  name: "QuickBars Smart TV Camera & Alert Suite (v1.8)"
   description: >
-    All-in-one QuickBars v1.7 Smart TV automation blueprint unifying motion & doorbell camera RTSP/HA-proxy
+    All-in-one QuickBars v1.8 Smart TV automation blueprint unifying motion & doorbell camera RTSP/HA-proxy
     PiP pop-ups, snapshot-first frame preloading, non-overlapping corner collision resolution, 2-Cam Split Dock
     & Auto Quad View, awake-only targeting (with Sabrina Google TV fleet support), detection-class accent borders,
     cross-sensor dedup, night/cinema ambient opacity dimming, Guest Privacy Mode, full HUD styling,
@@ -81,6 +81,22 @@ blueprint:
           default: ""
           selector:
             text: {}
+        snooze_helper:
+          name: Snooze State Helper (Optional)
+          description: "JSON helper storing per-camera TV remote snooze expirations (from quickbars.action snooze_15m)."
+          default: input_text.quickbars_snoozed_cameras
+          selector:
+            entity:
+              domain: input_text
+        snooze_duration_minutes:
+          name: Remote Snooze Duration (Minutes)
+          description: "How long a camera stays snoozed when snoozed from the Shield TV remote."
+          default: 15
+          selector:
+            number:
+              min: 1
+              max: 120
+              unit_of_measurement: min
 
     # ── 2. Camera, go2rtc & Snapshot Mapping ───────────────────────────────────
     camera_sources:
@@ -168,10 +184,22 @@ blueprint:
           default: []
           selector:
             object: {}
+        use_occupied_rooms_only:
+          name: Only Pop Up on Occupied-Room TVs (Optional)
+          description: "Uses Room Presence Map below to skip TVs whose room occupancy sensor is 'off'."
+          default: false
+          selector:
+            boolean: {}
+        room_presence_map:
+          name: TV App ID -> Room Occupancy Sensor Map
+          description: "Mapping of app_id to room occupancy entity_id (e.g. PAWN0F35 to binary_sensor.living_room_occupied)."
+          default: {}
+          selector:
+            object: {}
 
     # ── 4. PiP Visual Styling & HUD (QuickBars v1.7) ───────────────────────────
     pip_appearance:
-      name: "4. PiP Visual Styling & HUD (v1.7)"
+      name: "4. PiP Visual Styling & HUD (v1.8)"
       icon: mdi:palette-outline
       collapsed: true
       input:
@@ -299,6 +327,12 @@ blueprint:
         show_toast:
           name: Show Open/Close Toast
           default: false
+          selector:
+            boolean: {}
+        subtitle_safe_mode:
+          name: Subtitle Safe Corner Avoidance
+          description: "Prefers top corners over bottom corners while fullscreen video apps are active so subtitles stay clear."
+          default: true
           selector:
             boolean: {}
 
@@ -723,6 +757,9 @@ triggers:
     for:
       seconds: !input rebind_delay_seconds
     id: post_playback_rebind
+  - trigger: event
+    event_type: quickbars.action
+    id: pip_action
 
 conditions: []
 
@@ -734,6 +771,11 @@ actions:
       cooldown_sec: !input per_camera_cooldown_seconds
       dedup_sec: !input cross_sensor_dedup_seconds
       presence_ent: !input optional_home_presence_entity
+      snooze_ent: !input snooze_helper
+      snooze_mins: !input snooze_duration_minutes
+      occupied_only: !input use_occupied_rooms_only
+      room_map: !input room_presence_map
+      subtitle_safe_flag: !input subtitle_safe_mode
       go2rtc_host: !input go2rtc_rtsp_host
       cam_map: !input trigger_camera_map
       fallback_cam: !input fallback_camera_entity
@@ -843,6 +885,16 @@ actions:
                 {{ (guest_helper | string | trim | length > 0)
                    and is_state(guest_helper, 'on')
                    and (selected_cam in indoor_cams) }}
+              snooze_blocked: >
+                {% if not is_chime and (snooze_ent | string | trim | length > 0) %}
+                  {% set raw_s = states(snooze_ent) %}
+                  {% set smap = (raw_s | from_json({})) if raw_s not in ['unknown', 'unavailable', '', 'none'] else {} %}
+                  {% set exp_cam = smap.get(selected_cam, 0) | float(0) %}
+                  {% set exp_rtsp = smap.get(selected_rtsp, 0) | float(0) %}
+                  {{ (exp_cam > now().timestamp()) or (exp_rtsp > now().timestamp()) }}
+                {% else %}
+                  false
+                {% endif %}
               duplicate_physical_recent: >
                 {%- set ns = namespace(dup=false) -%}
                 {%- if (dedup_sec | int) > 0 -%}
@@ -909,7 +961,9 @@ actions:
                 {% set ns = namespace(ids=[]) %}
                 {% set excl = excluded_ids if excluded_ids is iterable else [] %}
                 {% for item in fleet %}
-                  {% if item.app_id not in excl and (not awake_only_flag or state_attr(item.sensor, 'display_on') == true) %}
+                  {% set occ_ent = room_map.get(item.app_id, '') if room_map is mapping else '' %}
+                  {% set occ_ok = (not occupied_only) or (occ_ent | length == 0) or (states(occ_ent) in ['on', 'home', 'occupied']) %}
+                  {% if occ_ok and (item.app_id not in excl) and (not awake_only_flag or state_attr(item.sensor, 'display_on') == true) %}
                     {% set ns.ids = ns.ids + [item.app_id] %}
                   {% endif %}
                 {% endfor %}
@@ -947,7 +1001,7 @@ actions:
                 {% endif %}
 
           - condition: template
-            value_template: "{{ (not guest_blocked) and (not duplicate_physical_recent) and (target_app_ids | length > 0) }}"
+            value_template: "{{ (not guest_blocked) and (not snooze_blocked) and (not duplicate_physical_recent) and (target_app_ids | length > 0) }}"
 
           - choose:
               - conditions:
@@ -981,6 +1035,7 @@ actions:
                       software_decoder: !input software_decoder
                       on_retrigger: extend
                       auto_close_on_sleep: !input auto_close_on_sleep
+                      subtitle_safe: "{{ subtitle_safe_flag }}"
                       priority: "{{ eff_prio }}"
                       speak_text: "{{ eff_speak }}"
               - conditions:
@@ -1034,6 +1089,7 @@ actions:
                       software_decoder: !input software_decoder
                       on_retrigger: extend
                       auto_close_on_sleep: !input auto_close_on_sleep
+                      subtitle_safe: "{{ subtitle_safe_flag }}"
                       priority: "{{ eff_prio }}"
                       speak_text: "{{ eff_speak }}"
               - conditions:
@@ -1067,6 +1123,7 @@ actions:
                       software_decoder: !input software_decoder
                       on_retrigger: !input on_retrigger
                       auto_close_on_sleep: !input auto_close_on_sleep
+                      subtitle_safe: "{{ subtitle_safe_flag }}"
                       priority: "{{ eff_prio }}"
                       speak_text: "{{ eff_speak }}"
                       cid: "{{ pip_cid }}"
@@ -1098,132 +1155,135 @@ actions:
                       mute_audio: "{{ eff_mute }}"
                       on_retrigger: !input on_retrigger
                       auto_close_on_sleep: !input auto_close_on_sleep
+                      subtitle_safe: "{{ subtitle_safe_flag }}"
                       priority: "{{ eff_prio }}"
                       speak_text: "{{ eff_speak }}"
                       cid: "{{ pip_cid }}"
                       actions: "{{ pip_actions }}"
 
-          - if:
-              - condition: template
-                value_template: >
-                  {{ is_chime and chime_unmute and chime_pause_media and ((chime_players | length) > 0) }}
-            then:
-              - variables:
-                  playing_now: "{{ chime_players | select('is_state', 'playing') | list }}"
-              - if:
-                  - condition: template
-                    value_template: "{{ playing_now | length > 0 }}"
-                then:
-                  - action: media_player.media_pause
-                    target:
-                      entity_id: "{{ playing_now }}"
-                  - delay:
-                      seconds: "{{ eff_auto_hide | int }}"
-                  - action: media_player.media_play
-                    target:
-                      entity_id: "{{ playing_now }}"
+          - parallel:
+            - if:
+                - condition: template
+                  value_template: >
+                    {{ is_chime and chime_pause_media and ((chime_players | length) > 0) }}
+              then:
+                - variables:
+                    playing_now: "{{ chime_players | select('is_state', 'playing') | list }}"
+                - if:
+                    - condition: template
+                      value_template: "{{ playing_now | length > 0 }}"
+                  then:
+                    - action: media_player.media_pause
+                      target:
+                        entity_id: "{{ playing_now }}"
+                    - delay:
+                        seconds: "{{ eff_auto_hide | int }}"
+                    - action: media_player.media_play
+                      target:
+                        entity_id: "{{ playing_now }}"
 
-          - if:
-              - condition: template
-                value_template: "{{ enable_pip_pills and is_chime }}"
-            then:
-              - wait_for_trigger:
-                  - trigger: event
-                    event_type: quickbars.action
-                    event_data:
-                      cid: "{{ pip_cid }}"
-                timeout:
-                  seconds: "{{ eff_auto_hide | int }}"
-                continue_on_timeout: false
-              - if:
-                  - condition: template
-                    value_template: "{{ wait.trigger is not none and wait.trigger.event.data.action_id == 'doorbell_pill_1' }}"
-                then: !input doorbell_pip_action_1_actions
+            - if:
+                - condition: template
+                  value_template: "{{ enable_pip_pills and is_chime }}"
+              then:
+                - wait_for_trigger:
+                    - trigger: event
+                      event_type: quickbars.action
+                      event_data:
+                        cid: "{{ pip_cid }}"
+                  timeout:
+                    seconds: "{{ eff_auto_hide | int }}"
+                  continue_on_timeout: false
+                - if:
+                    - condition: template
+                      value_template: "{{ wait.trigger is not none and wait.trigger.event.data.action_id == 'doorbell_pill_1' }}"
+                  then: !input doorbell_pip_action_1_actions
 
-          - if:
-              - condition: template
-                value_template: >
-                  {{ enable_notify
-                     and (selected_cam | length > 0)
-                     and ((notify_filter | length == 0) or (trig_ent in notify_filter)) }}
-            then:
-              - variables:
-                  notif_cid: "qb_{{ trig_ent.split('.')[-1] }}_{{ now().timestamp() | int }}"
-              - event: quickbars.notify
-                event_data:
-                  target_ids: "{{ target_app_ids }}"
-                  title: "{{ selected_title }}"
-                  message: "Activity detected"
-                  image_url: "/api/camera_proxy/{{ selected_cam }}"
-                  mdi_icon: "{{ 'mdi:doorbell-video' if is_chime else 'mdi:cctv' }}"
-                  color: "{{ notify_bg }}"
-                  duration: "{{ notify_dur | int }}"
-                  position: "{{ notify_pos }}"
-                  priority: "high"
-                  cid: "{{ notif_cid }}"
-                  actions:
-                    - id: show_live
-                      label: "{{ act1_lbl }}"
-                    - id: action_2
-                      label: "{{ act2_lbl }}"
-              - wait_for_trigger:
-                  - trigger: event
-                    event_type: quickbars.action
-                    event_data:
-                      cid: "{{ notif_cid }}"
-                timeout:
-                  seconds: 15
-                continue_on_timeout: false
-              - choose:
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ wait.trigger.event.data.action_id == 'show_live' and (selected_rtsp | length > 0) }}"
-                    sequence:
-                      - event: quickbars.open
-                        event_data:
-                          target_ids: "{{ target_app_ids }}"
-                          rtsp_url: "rtsp://{{ go2rtc_host }}/{{ selected_rtsp }}"
-                          snapshot_entity: "{{ eff_snap }}"
-                          camera_title: "{{ selected_title }} Live"
-                          position: "{{ resolved_corner }}"
-                          size: large
-                          border_color: "{{ eff_border }}"
-                          border_width_dp: "{{ border_w | int }}"
-                          corner_radius_dp: "{{ corner_r | int }}"
-                          opacity: "{{ eff_opacity | float }}"
-                          show_live_badge: "{{ show_live_flag }}"
-                          show_countdown_bar: "{{ show_bar_flag }}"
-                          auto_hide: 30
-                          mute_audio: "{{ eff_mute }}"
-                          rtsp_transport: !input rtsp_transport
-                          rtsp_latency: !input rtsp_latency
-                          on_retrigger: extend
-                          auto_close_on_sleep: !input auto_close_on_sleep
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ wait.trigger.event.data.action_id == 'show_live' and (selected_cam | length > 0) }}"
-                    sequence:
-                      - event: quickbars.open
-                        event_data:
-                          target_ids: "{{ target_app_ids }}"
-                          camera_entity: "{{ selected_cam }}"
-                          camera_title: "{{ selected_title }} Live"
-                          position: "{{ resolved_corner }}"
-                          size: large
-                          border_color: "{{ eff_border }}"
-                          border_width_dp: "{{ border_w | int }}"
-                          corner_radius_dp: "{{ corner_r | int }}"
-                          opacity: "{{ eff_opacity | float }}"
-                          show_live_badge: "{{ show_live_flag }}"
-                          show_countdown_bar: "{{ show_bar_flag }}"
-                          auto_hide: 30
-                          mute_audio: "{{ eff_mute }}"
-                          on_retrigger: extend
-                          auto_close_on_sleep: !input auto_close_on_sleep
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ wait.trigger.event.data.action_id == 'action_2' }}"
-                    sequence: !input notify_action_2_actions
+            - if:
+                - condition: template
+                  value_template: >
+                    {{ enable_notify
+                       and (selected_cam | length > 0)
+                       and ((notify_filter | length == 0) or (trig_ent in notify_filter)) }}
+              then:
+                - variables:
+                    notif_cid: "qb_{{ trig_ent.split('.')[-1] }}_{{ now().timestamp() | int }}"
+                - event: quickbars.notify
+                  event_data:
+                    target_ids: "{{ target_app_ids }}"
+                    title: "{{ selected_title }}"
+                    message: "Activity detected"
+                    image_url: "/api/camera_proxy/{{ selected_cam }}"
+                    mdi_icon: "{{ 'mdi:doorbell-video' if is_chime else 'mdi:cctv' }}"
+                    color: "{{ notify_bg }}"
+                    duration: "{{ notify_dur | int }}"
+                    position: "{{ notify_pos }}"
+                    priority: "high"
+                    cid: "{{ notif_cid }}"
+                    actions:
+                      - id: show_live
+                        label: "{{ act1_lbl }}"
+                      - id: action_2
+                        label: "{{ act2_lbl }}"
+                - wait_for_trigger:
+                    - trigger: event
+                      event_type: quickbars.action
+                      event_data:
+                        cid: "{{ notif_cid }}"
+                  timeout:
+                    seconds: 15
+                  continue_on_timeout: false
+                - choose:
+                    - conditions:
+                        - condition: template
+                          value_template: "{{ wait.trigger.event.data.action_id == 'show_live' and (selected_rtsp | length > 0) }}"
+                      sequence:
+                        - event: quickbars.open
+                          event_data:
+                            target_ids: "{{ target_app_ids }}"
+                            rtsp_url: "rtsp://{{ go2rtc_host }}/{{ selected_rtsp }}"
+                            snapshot_entity: "{{ eff_snap }}"
+                            camera_title: "{{ selected_title }} Live"
+                            position: "{{ resolved_corner }}"
+                            size: large
+                            border_color: "{{ eff_border }}"
+                            border_width_dp: "{{ border_w | int }}"
+                            corner_radius_dp: "{{ corner_r | int }}"
+                            opacity: "{{ eff_opacity | float }}"
+                            show_live_badge: "{{ show_live_flag }}"
+                            show_countdown_bar: "{{ show_bar_flag }}"
+                            auto_hide: 30
+                            mute_audio: "{{ eff_mute }}"
+                            rtsp_transport: !input rtsp_transport
+                            rtsp_latency: !input rtsp_latency
+                            on_retrigger: extend
+                            auto_close_on_sleep: !input auto_close_on_sleep
+                    - conditions:
+                        - condition: template
+                          value_template: "{{ wait.trigger.event.data.action_id == 'show_live' and (selected_cam | length > 0) }}"
+                      sequence:
+                        - event: quickbars.open
+                          event_data:
+                            target_ids: "{{ target_app_ids }}"
+                            camera_entity: "{{ selected_cam }}"
+                            camera_title: "{{ selected_title }} Live"
+                            position: "{{ resolved_corner }}"
+                            size: large
+                            border_color: "{{ eff_border }}"
+                            border_width_dp: "{{ border_w | int }}"
+                            corner_radius_dp: "{{ corner_r | int }}"
+                            opacity: "{{ eff_opacity | float }}"
+                            show_live_badge: "{{ show_live_flag }}"
+                            show_countdown_bar: "{{ show_bar_flag }}"
+                            auto_hide: 30
+                            mute_audio: "{{ eff_mute }}"
+                            on_retrigger: extend
+                            auto_close_on_sleep: !input auto_close_on_sleep
+                    - conditions:
+                        - condition: template
+                          value_template: "{{ wait.trigger.event.data.action_id == 'action_2' }}"
+                      sequence: !input notify_action_2_actions
+
 
       # ── Branch B: Sync HA Helpers to QuickBars TV Fleet Over WebSocket ──────
       - conditions:
@@ -1380,3 +1440,36 @@ actions:
           - action: script.turn_on
             target:
               entity_id: !input rebind_script
+
+      # ── Branch F: Handle In-PiP / Remote Snooze & Doorbell Actions ─────────
+      - conditions:
+          - condition: trigger
+            id: pip_action
+        sequence:
+          - variables:
+              act_id: "{{ trigger.event.data.get('action_id', '') }}"
+              act_entity: "{{ trigger.event.data.get('entity_id', '') or trigger.event.data.get('camera_id', '') }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ act_id in ['snooze_15m', 'snooze']
+                     and (act_entity | length > 0)
+                     and (snooze_ent | string | trim | length > 0) }}
+            then:
+              - variables:
+                  updated_snooze: >
+                    {% set raw_s = states(snooze_ent) %}
+                    {% set cur = (raw_s | from_json({})) if raw_s not in ['unknown', 'unavailable', '', 'none'] else {} %}
+                    {% set now_ts = now().timestamp() %}
+                    {% set pruned = namespace(d={}) %}
+                    {% for k, v in cur.items() if (v | float(0)) > now_ts %}
+                      {% set pruned.d = dict(pruned.d, **{k: v}) %}
+                    {% endfor %}
+                    {% set key_clean = act_entity.split('/')[-1] if act_entity.startswith('rtsp:') else act_entity %}
+                    {% set exp = (now_ts + (snooze_mins | int(15) * 60)) | int %}
+                    {{ dict(pruned.d, **{key_clean: exp}) | to_json }}
+              - action: input_text.set_value
+                target:
+                  entity_id: "{{ snooze_ent }}"
+                data:
+                  value: "{{ updated_snooze[:250] }}"

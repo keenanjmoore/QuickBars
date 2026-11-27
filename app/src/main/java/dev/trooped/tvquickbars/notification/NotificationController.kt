@@ -68,16 +68,16 @@ class NotificationController(
         notificationPlayer = null
         notificationLoudness?.let { try { it.release() } catch (_: Throwable) {} }
         notificationLoudness = null
-        notificationLoudness?.let { try { it.release() } catch (_: Throwable) {} }
-        notificationLoudness = null
 
         // remove overlay
         val v = notificationOverlay
         notificationOverlay = null
         if (v != null) {
             try { lifecycleOwner.pause() } catch (_: Throwable) {}
-            try { v.setContent { } } catch (_: Throwable) {}
-            try { windowManager.removeViewImmediate(v) } catch (_: Throwable) {}
+            try { v.disposeComposition() } catch (_: Throwable) {}
+            try { windowManager.removeViewImmediate(v) } catch (t: Throwable) {
+                Log.w("NotificationController", "removeViewImmediate in onDestroy failed: ${t.message}")
+            }
         }
 
         try { lifecycleOwner.destroy() } catch (_: Throwable) {}
@@ -92,8 +92,7 @@ class NotificationController(
     @MainThread
     fun enqueue(spec: NotificationSpec) {
         runOnMain {
-            if (spec.interrupt == true) {
-                // Interrupt: clear queue, show this one next, preempt current if showing
+            if (spec.interrupt) {
                 notificationQueue.clear()
                 notificationQueue.addFirst(spec)
                 if (isNotificationShowing) {
@@ -104,8 +103,21 @@ class NotificationController(
                 return@runOnMain
             }
 
-            // Normal queue behavior
-            notificationQueue.addLast(spec)
+            // Coalesce queued duplicates sharing non-blank cid or title
+            val matchIdx = notificationQueue.indexOfFirst { q ->
+                (!spec.cid.isNullOrBlank() && q.cid == spec.cid) ||
+                    (!spec.title.isNullOrBlank() && q.title == spec.title && spec.cid.isNullOrBlank())
+            }
+            if (matchIdx >= 0) {
+                notificationQueue[matchIdx] = spec
+            } else {
+                val prio = spec.priority?.lowercase() ?: "normal"
+                if (prio == "critical" || prio == "high") {
+                    notificationQueue.addFirst(spec)
+                } else {
+                    notificationQueue.addLast(spec)
+                }
+            }
             if (!isNotificationShowing) showNextNotification()
         }
     }
@@ -221,14 +233,14 @@ class NotificationController(
         notificationOverlay = null
 
         try { lifecycleOwner.pause() } catch (_: Throwable) {}
-        try { v.setContent { } } catch (_: Throwable) {}
+        try { v.disposeComposition() } catch (_: Throwable) {}
 
         try {
             if (immediate) windowManager.removeViewImmediate(v) else windowManager.removeView(v)
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            Log.w("NotificationController", "removeView failed (${t.message}), trying immediate")
             try { windowManager.removeViewImmediate(v) } catch (_: Throwable) {}
         } finally {
-            try { v.setContent { } } catch (_: Throwable) {}
             onNotificationHidden()
         }
     }

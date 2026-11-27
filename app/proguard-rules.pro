@@ -1,17 +1,3 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
-
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
-
 -keepattributes *Annotation*, Signature
 
 -keep class * extends com.google.gson.TypeAdapter { *; }
@@ -19,19 +5,20 @@
 -keep class * implements com.google.gson.JsonDeserializer { *; }
 
 -keep class dev.trooped.tvquickbars.data.** { *; }
--keep class dev.trooped.tvquickbars.camera.** { *; }
--keep class dev.trooped.tvquickbars.notification.** { *; }
 -keep class dev.trooped.tvquickbars.ha.ws.** { *; }
+-keepclassmembers class dev.trooped.tvquickbars.camera.CameraRequest { *; }
+-keepclassmembers class dev.trooped.tvquickbars.camera.CameraPipSpec { *; }
+-keepclassmembers class dev.trooped.tvquickbars.camera.PipAction { *; }
+-keepclassmembers class dev.trooped.tvquickbars.camera.RtspProfile { *; }
+-keepclassmembers class dev.trooped.tvquickbars.notification.NotificationSpec { *; }
+-keepclassmembers class dev.trooped.tvquickbars.notification.NotificationAction { *; }
 
-# Keep AndroidX DataStore + Tink + Media3 RTSP reflection targets
--keep class androidx.datastore.** { *; }
--keep class com.google.crypto.tink.** { *; }
+# Keep Media3 RTSP reflection targets
 -keep class androidx.media3.exoplayer.rtsp.** { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Strip verbose/debug logging calls in release builds
+-assumenosideeffects class android.util.Log {
+    public static boolean isLoggable(java.lang.String, int);
+    public static int d(...);
+    public static int v(...);
+}

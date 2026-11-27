@@ -1,10 +1,13 @@
 package dev.trooped.tvquickbars.ha.ws.handlers
 
+import dev.trooped.tvquickbars.camera.CameraPipController
 import dev.trooped.tvquickbars.camera.CameraRequest
 import dev.trooped.tvquickbars.data.CategoryItem
 import dev.trooped.tvquickbars.ha.ConnectionState
+import dev.trooped.tvquickbars.ha.HomeAssistantClient
 import dev.trooped.tvquickbars.ha.HomeAssistantListener
 import dev.trooped.tvquickbars.ha.ws.HaClientBridge
+import dev.trooped.tvquickbars.utils.AppUpdateManager
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -107,5 +110,45 @@ class QuickBarsHandlersTest {
         handler.handle(deltaAfterClear, bridge)
         assertEquals(3, received.size)
         assertNull(received[2].third.opt("brightness")?.takeIf { it == 50 })
+    }
+
+    @Test
+    fun sanitize_rtsp_userinfo_does_not_double_encode_percent_escapes() {
+        val inUrl = "rtsp://admin:N%40n33k123@192.168.5.199:554/h264Preview_01_sub"
+        assertEquals(inUrl, CameraPipController.sanitizeRtspUserInfo(inUrl))
+
+        val rawUrl = "rtsp://admin:N@n33k!@192.168.5.199:554/h264Preview_01_sub"
+        assertEquals("rtsp://admin:N%40n33k%21@192.168.5.199:554/h264Preview_01_sub", CameraPipController.sanitizeRtspUserInfo(rawUrl))
+    }
+
+    @Test
+    fun go2rtc_url_appends_video_only_when_muted() {
+        val base = "rtsp://192.168.1.146:8554/front_door?video&audio"
+        assertEquals("rtsp://192.168.1.146:8554/front_door?video", CameraPipController.formatGo2RtcUrl(base, muteAudio = true))
+        assertEquals("rtsp://192.168.1.146:8554/front_door", CameraPipController.formatGo2RtcUrl(base, muteAudio = false))
+    }
+
+    @Test
+    fun fast_reconnect_works_without_saved_entities_and_call_service_uses_target_only() {
+        assertTrue(HomeAssistantClient.shouldUseFastReconnect(useEntitySubscription = true, hasDiscoveredWatchIds = true))
+        assertFalse(HomeAssistantClient.shouldUseFastReconnect(useEntitySubscription = false, hasDiscoveredWatchIds = true))
+
+        val msg = HomeAssistantClient.buildCallServiceMessage(
+            commandId = 9,
+            domain = "light",
+            service = "turn_on",
+            entityId = "light.kitchen",
+            data = JSONObject().put("entity_id", "light.kitchen").put("brightness", 128)
+        )
+        assertEquals("light.kitchen", msg.getJSONObject("target").getString("entity_id"))
+        val sData = msg.getJSONObject("service_data")
+        assertFalse(sData.has("entity_id"))
+        assertEquals(128, sData.getInt("brightness"))
+    }
+
+    @Test
+    fun semver_comparison_identifies_v180_newer_than_v170() {
+        assertTrue(AppUpdateManager.compareSemVer("v1.8.0", "1.7.0") > 0)
+        assertEquals(0, AppUpdateManager.compareSemVer("v1.8.0", "1.8.0"))
     }
 }

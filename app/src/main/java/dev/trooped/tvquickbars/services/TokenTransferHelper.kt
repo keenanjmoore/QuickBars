@@ -91,11 +91,8 @@ class TokenTransferHelper(private val context: Context) {
         onTokenReceived: (String, String) -> Unit
     ) {
         try {
-            // Try to stop any existing server first
+            // Stop any existing server first (NanoHTTPD closes synchronously)
             stopServer()
-
-            // Small delay to ensure port is released
-            Thread.sleep(100)
 
             // Try to start the server with the default port
             startServerWithPort(8765, tokenOnlyMode, onTokenReceived)
@@ -160,9 +157,6 @@ class TokenTransferHelper(private val context: Context) {
             tokenServer?.stop()
             tokenServer = null
             Log.d(TAG, "Server stopped")
-
-            // Allow a moment for the port to be released
-            Thread.sleep(100)
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping server: ${e.message}")
         }

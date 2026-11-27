@@ -1,15 +1,17 @@
 package dev.trooped.tvquickbars.camera
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Parcel
 import android.os.Parcelable
-import android.text.format.DateFormat
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -43,6 +45,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import androidx.media3.ui.compose.PlayerSurface
+import androidx.media3.ui.compose.SURFACE_TYPE_SURFACE_VIEW
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import dev.trooped.tvquickbars.R
 import dev.trooped.tvquickbars.utils.SharedHttpClients
@@ -53,7 +56,12 @@ import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.InputStream
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.coroutines.coroutineContext
+
+private val PIP_CLOCK_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 
 private fun parseBorderColor(hex: String?): Color? {
     val clean = hex?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -78,9 +86,11 @@ private fun appendCacheBuster(url: String, epochMs: Long): String {
 fun CameraPipOverlay(
     spec: CameraPipSpec,
     countdownResetKey: Long = 0L,
+    openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
     onClose: () -> Unit = {},
     onActionClick: (PipAction) -> Unit = {},
     onCodecActive: (String?) -> Unit = {},
+    onFirstFrameMs: (Long) -> Unit = {},
     onPlaybackError: (String) -> Unit = {}
 ) {
     val shape = RoundedCornerShape(spec.cornerRadiusDp.coerceIn(0, 24).dp)
@@ -122,14 +132,18 @@ fun CameraPipOverlay(
                 if (spec.isGroup && spec.groupSpecs.isNotEmpty()) {
                     MultiCameraPipOverlay(
                         spec = spec,
+                        openedAtElapsedMs = openedAtElapsedMs,
                         onClose = onClose,
                         onCodecActive = onCodecActive,
+                        onFirstFrameMs = onFirstFrameMs,
                         onPlaybackError = onPlaybackError
                     )
                 } else {
                     SingleCameraFeedView(
                         spec = spec,
+                        openedAtElapsedMs = openedAtElapsedMs,
                         onCodecActive = onCodecActive,
+                        onFirstFrameMs = onFirstFrameMs,
                         onPlaybackError = onPlaybackError
                     )
                     if (spec.showTimestamp) {
@@ -140,7 +154,16 @@ fun CameraPipOverlay(
                         )
                     }
                 }
-                if (spec.showCountdownBar && spec.autoHideTimeout > 0) {
+                if (spec.isPinned || spec.priority == "critical" || spec.priority == "high") {
+                    PipStatusPills(
+                        isPinned = spec.isPinned,
+                        priority = spec.priority,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(6.dp)
+                    )
+                }
+                if (spec.showCountdownBar && spec.autoHideTimeout > 0 && !spec.isPinned) {
                     PipCountdownBar(
                         autoHideTimeoutSec = spec.autoHideTimeout,
                         accentColor = borderColor,
@@ -200,12 +223,53 @@ private fun PipQuickActionBar(
 }
 
 @Composable
+private fun PipStatusPills(
+    isPinned: Boolean,
+    priority: String,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isPinned) {
+            Text(
+                text = "PINNED",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF38BDF8),
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 2.dp)
+            )
+        }
+        if (priority == "critical") {
+            Text(
+                text = "DOORBELL",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFFCA5A5),
+                modifier = Modifier
+                    .background(Color(0xFF7F1D1D).copy(alpha = 0.8f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 2.dp)
+            )
+        }
+    }
+}
+
+@Composable
 private fun PipTimestampBadge(modifier: Modifier = Modifier) {
-    var clock by remember { mutableStateOf(DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()) }
+    val zone = remember { ZoneId.systemDefault() }
+    var clock by remember {
+        mutableStateOf(PIP_CLOCK_FORMATTER.format(Instant.now().atZone(zone)))
+    }
     LaunchedEffect(Unit) {
         while (isActive) {
-            clock = DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()
-            delay(1000L)
+            val nowMs = System.currentTimeMillis()
+            clock = PIP_CLOCK_FORMATTER.format(Instant.ofEpochMilli(nowMs).atZone(zone))
+            val delayMs = (1000L - (nowMs % 1000L)).coerceIn(50L, 1000L)
+            delay(delayMs)
         }
     }
     Text(
@@ -226,13 +290,18 @@ private fun PipCountdownBar(
     resetKey: Long,
     modifier: Modifier = Modifier
 ) {
-    val progress = remember { Animatable(1f) }
+    var fraction by remember { mutableStateOf(1f) }
     LaunchedEffect(autoHideTimeoutSec, resetKey) {
-        progress.snapTo(1f)
-        progress.animateTo(
-            targetValue = 0f,
-            animationSpec = tween(durationMillis = autoHideTimeoutSec * 1000, easing = LinearEasing)
-        )
+        val totalMs = (autoHideTimeoutSec * 1000L).coerceAtLeast(1000L)
+        val startMs = SystemClock.elapsedRealtime()
+        fraction = 1f
+        while (isActive) {
+            val elapsed = SystemClock.elapsedRealtime() - startMs
+            val rem = (1f - (elapsed.toFloat() / totalMs.toFloat())).coerceIn(0f, 1f)
+            fraction = rem
+            if (rem <= 0f) break
+            delay(100L)
+        }
     }
     Box(
         modifier = modifier
@@ -243,7 +312,7 @@ private fun PipCountdownBar(
         Box(
             modifier = Modifier
                 .fillMaxHeight()
-                .fillMaxWidth(fraction = progress.value.coerceIn(0f, 1f))
+                .fillMaxWidth(fraction = fraction)
                 .background(accentColor ?: Color(0xFF38BDF8))
         )
     }
@@ -255,8 +324,10 @@ private fun PipCountdownBar(
 @Composable
 fun MultiCameraPipOverlay(
     spec: CameraPipSpec,
+    openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
     onClose: () -> Unit = {},
     onCodecActive: (String?) -> Unit = {},
+    onFirstFrameMs: (Long) -> Unit = {},
     onPlaybackError: (String) -> Unit = {}
 ) {
     val specs = spec.groupSpecs
@@ -284,8 +355,10 @@ fun MultiCameraPipOverlay(
                                 .clip(RoundedCornerShape(4.dp))
                         ) {
                             SingleCameraFeedView(
-                                s.copy(widthDp = perTileW, heightDp = perTileH),
+                                s.copy(widthDp = perTileW, heightDp = perTileH, isGroup = true),
+                                openedAtElapsedMs = openedAtElapsedMs,
                                 onCodecActive = onCodecActive,
+                                onFirstFrameMs = onFirstFrameMs,
                                 onPlaybackError = onPlaybackError
                             )
                         }
@@ -305,8 +378,10 @@ fun MultiCameraPipOverlay(
                                 .clip(RoundedCornerShape(4.dp))
                         ) {
                             SingleCameraFeedView(
-                                s.copy(widthDp = perTileW, heightDp = perTileH),
+                                s.copy(widthDp = perTileW, heightDp = perTileH, isGroup = true),
+                                openedAtElapsedMs = openedAtElapsedMs,
                                 onCodecActive = onCodecActive,
+                                onFirstFrameMs = onFirstFrameMs,
                                 onPlaybackError = onPlaybackError
                             )
                         }
@@ -328,8 +403,10 @@ fun MultiCameraPipOverlay(
                                     .clip(RoundedCornerShape(4.dp))
                             ) {
                                 SingleCameraFeedView(
-                                    s.copy(widthDp = perTileW, heightDp = perTileH),
+                                    s.copy(widthDp = perTileW, heightDp = perTileH, isGroup = true),
+                                    openedAtElapsedMs = openedAtElapsedMs,
                                     onCodecActive = onCodecActive,
+                                    onFirstFrameMs = onFirstFrameMs,
                                     onPlaybackError = onPlaybackError
                                 )
                             }
@@ -354,8 +431,10 @@ fun MultiCameraPipOverlay(
                                         .clip(RoundedCornerShape(4.dp))
                                 ) {
                                     SingleCameraFeedView(
-                                        s.copy(widthDp = perTileW, heightDp = perTileH),
+                                        s.copy(widthDp = perTileW, heightDp = perTileH, isGroup = true),
+                                        openedAtElapsedMs = openedAtElapsedMs,
                                         onCodecActive = onCodecActive,
+                                        onFirstFrameMs = onFirstFrameMs,
                                         onPlaybackError = onPlaybackError
                                     )
                                 }
@@ -375,8 +454,10 @@ fun MultiCameraPipOverlay(
                                         .clip(RoundedCornerShape(4.dp))
                                 ) {
                                     SingleCameraFeedView(
-                                        s.copy(widthDp = perTileW, heightDp = perTileH),
+                                        s.copy(widthDp = perTileW, heightDp = perTileH, isGroup = true),
+                                        openedAtElapsedMs = openedAtElapsedMs,
                                         onCodecActive = onCodecActive,
+                                        onFirstFrameMs = onFirstFrameMs,
                                         onPlaybackError = onPlaybackError
                                     )
                                 }
@@ -419,12 +500,15 @@ private fun PipLiveBadge(label: String = "LIVE", modifier: Modifier = Modifier) 
 @Composable
 fun SingleCameraFeedView(
     spec: CameraPipSpec,
+    openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
     onCodecActive: (String?) -> Unit = {},
+    onFirstFrameMs: (Long) -> Unit = {},
     onPlaybackError: (String) -> Unit = {}
 ) {
     val density = LocalDensity.current.density
     val targetPxW = remember(spec.widthDp, density) { (spec.widthDp * density).toInt().coerceAtLeast(160) }
     val targetPxH = remember(spec.heightDp, density) { (spec.heightDp * density).toInt().coerceAtLeast(90) }
+    val useSurfaceView = !spec.isGroup && spec.opacity >= 0.99f && spec.cornerRadiusDp == 0
 
     Box(modifier = Modifier.fillMaxSize()) {
         val isExoStream = remember(spec.url) {
@@ -442,12 +526,17 @@ fun SingleCameraFeedView(
                 snapshotUrl = spec.snapshotUrl,
                 authToken = spec.authToken,
                 showLiveBadge = spec.showLiveBadge,
+                useSurfaceView = useSurfaceView,
+                targetPxW = targetPxW,
+                targetPxH = targetPxH,
+                openedAtElapsedMs = openedAtElapsedMs,
                 canFallbackToMjpeg = !spec.fallbackMjpegUrl.isNullOrBlank(),
                 onFallbackToMjpeg = {
                     Log.w("SingleCameraFeedView", "RTSP failed 3x for ${spec.entityId}; falling back to HA MJPEG stream")
                     fallbackToMjpeg = true
                 },
                 onCodecActive = onCodecActive,
+                onFirstFrameMs = onFirstFrameMs,
                 onPlaybackError = onPlaybackError,
                 modifier = Modifier.fillMaxSize()
             )
@@ -499,9 +588,9 @@ fun SingleCameraFeedView(
 }
 
 enum class StreamLatency(val minBufferMs: Int, val maxBufferMs: Int, val startBufferMs: Int, val rebufferMs: Int) {
-    LOW_LATENCY(minBufferMs = 500, maxBufferMs = 2000, startBufferMs = 500, rebufferMs = 500),
-    BALANCED(minBufferMs = 1000, maxBufferMs = 4000, startBufferMs = 1000, rebufferMs = 1000),
-    HIGH_STABILITY(minBufferMs = 2000, maxBufferMs = 8000, startBufferMs = 2000, rebufferMs = 2000)
+    LOW_LATENCY(minBufferMs = 300, maxBufferMs = 1500, startBufferMs = 150, rebufferMs = 250),
+    BALANCED(minBufferMs = 600, maxBufferMs = 3000, startBufferMs = 350, rebufferMs = 500),
+    HIGH_STABILITY(minBufferMs = 1500, maxBufferMs = 6000, startBufferMs = 1000, rebufferMs = 1500)
 }
 
 enum class TransportProtocol { AUTO, TCP, UDP }
@@ -543,48 +632,64 @@ private fun CameraRtspView(
     snapshotUrl: String? = null,
     authToken: String? = null,
     showLiveBadge: Boolean = true,
+    useSurfaceView: Boolean = false,
+    targetPxW: Int = 560,
+    targetPxH: Int = 316,
+    openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
     canFallbackToMjpeg: Boolean = false,
     onFallbackToMjpeg: () -> Unit = {},
     onCodecActive: (String?) -> Unit = {},
+    onFirstFrameMs: (Long) -> Unit = {},
     onPlaybackError: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    var showDebug by remember(url, config) { mutableStateOf(false) }
-    var lastError by remember(url, config) { mutableStateOf<String?>(null) }
-    var retryCount by remember(url, config) { mutableStateOf(0) }
-    var isFirstFrameRendered by remember(url, config) { mutableStateOf(false) }
-    var pendingRetry by remember(url, config) { mutableStateOf(false) }
+    var showDebug by remember(url, config.transport, config.latency, config.useSoftwareDecoder) { mutableStateOf(false) }
+    var lastError by remember(url, config.transport, config.latency, config.useSoftwareDecoder) { mutableStateOf<String?>(null) }
+    var retryCount by remember(url, config.transport, config.latency, config.useSoftwareDecoder) { mutableStateOf(0) }
+    var isFirstFrameRendered by remember(url, config.transport, config.latency, config.useSoftwareDecoder) { mutableStateOf(false) }
+    var pendingRetry by remember(url, config.transport, config.latency, config.useSoftwareDecoder) { mutableStateOf(false) }
     var snapshotBmp by remember(snapshotUrl) { mutableStateOf<Bitmap?>(null) }
-    var videoW by remember(url, config) { mutableStateOf(0) }
-    var videoH by remember(url, config) { mutableStateOf(0) }
+    var videoW by remember(url, config.transport, config.latency, config.useSoftwareDecoder) { mutableStateOf(0) }
+    var videoH by remember(url, config.transport, config.latency, config.useSoftwareDecoder) { mutableStateOf(0) }
+    val latestOnFirstFrame by rememberUpdatedState(onFirstFrameMs)
 
-    // Cache-busted snapshot-first fetch while ExoPlayer negotiates RTSP
-    LaunchedEffect(snapshotUrl, authToken) {
+    // Cache-busted snapshot-first fetch (uses prefetched bytes if ready; swaps bitmap on Main thread before recycling)
+    LaunchedEffect(snapshotUrl, authToken, targetPxW, targetPxH) {
         if (snapshotUrl.isNullOrBlank()) return@LaunchedEffect
-        val bustedUrl = appendCacheBuster(snapshotUrl, System.currentTimeMillis())
-        withContext(Dispatchers.IO) {
-            try {
-                val reqBuilder = Request.Builder().url(bustedUrl)
-                if (!authToken.isNullOrBlank()) {
-                    reqBuilder.header("Authorization", "Bearer $authToken")
-                }
-                SharedHttpClients.mediaFetch.newCall(reqBuilder.build()).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val bytes = resp.body?.bytes()
-                        if (bytes != null && bytes.isNotEmpty()) {
-                            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                            val prev = snapshotBmp
-                            snapshotBmp = decoded
-                            if (prev != null && prev !== decoded && !prev.isRecycled) {
-                                prev.recycle()
-                            }
-                        }
+        val prefetched = CameraPipController.consumePrefetchedSnapshot(snapshotUrl)
+        val decoded: Bitmap? = withContext(Dispatchers.IO) {
+            val bytes = prefetched ?: run {
+                try {
+                    val bustedUrl = appendCacheBuster(snapshotUrl, System.currentTimeMillis())
+                    val reqBuilder = Request.Builder().url(bustedUrl)
+                    if (!authToken.isNullOrBlank()) {
+                        reqBuilder.header("Authorization", "Bearer $authToken")
                     }
+                    SharedHttpClients.mediaFetch.newCall(reqBuilder.build()).execute().use { resp ->
+                        if (resp.isSuccessful) resp.body?.bytes() else null
+                    }
+                } catch (_: Throwable) {
+                    null
                 }
-            } catch (_: Throwable) {}
+            }
+            if (bytes != null && bytes.isNotEmpty()) {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val sample = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    calculateInSampleSize(bounds.outWidth, bounds.outHeight, targetPxW, targetPxH)
+                } else 2
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            } else null
+        }
+        if (decoded != null) {
+            val prev = snapshotBmp
+            snapshotBmp = decoded
+            if (prev != null && prev !== decoded && !prev.isRecycled) {
+                prev.recycle()
+            }
         }
     }
 
@@ -606,7 +711,7 @@ private fun CameraRtspView(
         }
     }
 
-    val player = remember(url, config, if (pendingRetry) -1 else retryCount) {
+    val player = remember(url, config.transport, config.latency, config.useSoftwareDecoder, if (pendingRetry) -1 else retryCount) {
         if (pendingRetry) return@remember null
         try {
             val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
@@ -635,8 +740,8 @@ private fun CameraRtspView(
                     if (config.latency == StreamLatency.LOW_LATENCY) {
                         setLiveConfiguration(
                             androidx.media3.common.MediaItem.LiveConfiguration.Builder()
-                                .setTargetOffsetMs(400)
-                                .setMaxPlaybackSpeed(1.04f)
+                                .setTargetOffsetMs(250)
+                                .setMaxPlaybackSpeed(1.06f)
                                 .build()
                         )
                     }
@@ -645,7 +750,7 @@ private fun CameraRtspView(
 
             val mediaSource = if (url.startsWith("rtsp://", ignoreCase = true)) {
                 val rtspFactory = androidx.media3.exoplayer.rtsp.RtspMediaSource.Factory()
-                    .setTimeoutMs(25000)
+                    .setTimeoutMs(6000)
 
                 when (config.transport) {
                     TransportProtocol.TCP -> rtspFactory.setForceUseRtpTcp(true)
@@ -671,11 +776,12 @@ private fun CameraRtspView(
                 .setTrackSelector(trackSelector)
                 .build().apply {
                     val attrs = androidx.media3.common.AudioAttributes.Builder()
-                        .setUsage(C.USAGE_MEDIA)
-                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .setUsage(C.USAGE_ASSISTANCE_SONIFICATION)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
                         .build()
 
-                    setAudioAttributes(attrs, !config.muteAudio)
+                    // Manage transient ducking audio focus manually so unmuted PiP never permanently stops Plex/Netflix
+                    setAudioAttributes(attrs, false)
                     volume = if (config.muteAudio) 0f else 1f
                     videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
@@ -699,7 +805,9 @@ private fun CameraRtspView(
                                 self.videoFormat?.sampleMimeType
                             }
                             onCodecActive(codecName ?: "h264")
-                            Log.i("CameraRtspView", "FIRST_FRAME url=$url size=${effW}x${effH}")
+                            val ttff = (SystemClock.elapsedRealtime() - openedAtElapsedMs).coerceAtLeast(1L)
+                            latestOnFirstFrame(ttff)
+                            Log.i("CameraRtspView", "FIRST_FRAME url=$url size=${effW}x${effH} ttffMs=$ttff")
                         }
 
                         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -735,6 +843,30 @@ private fun CameraRtspView(
         }
     }
 
+    // Dynamic in-place mute/unmute + transient ducking audio focus
+    DisposableEffect(player, config.muteAudio) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        var focusReq: AudioFocusRequest? = null
+        if (player != null) {
+            player.volume = if (config.muteAudio) 0f else 1f
+            if (!config.muteAudio && am != null) {
+                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .build()
+                focusReq = req
+                runCatching { am.requestAudioFocus(req) }
+            }
+        }
+        onDispose {
+            focusReq?.let { r -> runCatching { am?.abandonAudioFocusRequest(r) } }
+        }
+    }
+
     // Smoothly crossfade out snapshot once live video first frame renders
     val snapshotAlpha by animateFloatAsState(
         targetValue = if (!isFirstFrameRendered && snapshotBmp != null && !showDebug) 1f else 0f,
@@ -746,7 +878,7 @@ private fun CameraRtspView(
         if (player != null) {
             PlayerSurface(
                 player = player,
-                surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
+                surfaceType = if (useSurfaceView) SURFACE_TYPE_SURFACE_VIEW else SURFACE_TYPE_TEXTURE_VIEW,
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -840,13 +972,18 @@ fun DebugInfoOverlay(
                 }
             },
             update = { view ->
-                (view.tag as? androidx.media3.exoplayer.util.DebugTextViewHelper)?.stop()
-                val helper = androidx.media3.exoplayer.util.DebugTextViewHelper(player, view)
-                helper.start()
-                view.tag = helper
+                val cur = view.tag as? Pair<*, *>
+                if (cur?.first !== player) {
+                    (cur?.second as? androidx.media3.exoplayer.util.DebugTextViewHelper)?.stop()
+                    val helper = androidx.media3.exoplayer.util.DebugTextViewHelper(player, view)
+                    helper.start()
+                    view.tag = player to helper
+                }
             },
             onRelease = { view ->
-                (view.tag as? androidx.media3.exoplayer.util.DebugTextViewHelper)?.stop()
+                val cur = view.tag as? Pair<*, *>
+                (cur?.second as? androidx.media3.exoplayer.util.DebugTextViewHelper)?.stop()
+                view.tag = null
             }
         )
 

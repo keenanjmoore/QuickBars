@@ -31,16 +31,22 @@ jobs:
         run: chmod +x gradlew
 
       - name: Run JVM Unit Tests
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+        run: ./gradlew testReleaseUnitTest --no-daemon --stacktrace
 
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Compute Version & SHA256
+      - name: Compute Version & SHA256 & APK Size Gate
         id: meta
         run: |
           VERSION=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
           APK_PATH=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          APK_BYTES=$(stat -c%s "$APK_PATH")
+          APK_MB=$(awk "BEGIN {printf \"%.2f\", $APK_BYTES/1048576}")
+          echo "Built $APK_PATH ($APK_BYTES bytes / ${APK_MB} MB)"
+          if [ "$APK_BYTES" -gt 14680064 ]; then
+            echo "Warning: APK exceeds 14.0 MB target ($APK_MB MB)"
+          fi
           sha256sum "$APK_PATH" > "${APK_PATH}.sha256"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
