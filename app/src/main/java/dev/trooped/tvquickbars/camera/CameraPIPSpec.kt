@@ -37,7 +37,7 @@ data class CameraPipSpec(
     val widthDp: Int = 280,
     val heightDp: Int = 158,
     val marginDp: Int = 20,
-    val showTitle: Boolean = true,
+    val showTitle: Boolean = false,
     val cornerPosition: String = "TOP_LEFT",
     val autoHideTimeout: Int = 30,
     val rtspProfile: RtspProfile = RtspProfile(),
@@ -52,7 +52,7 @@ data class CameraPipSpec(
     val borderWidthDp: Int = 0,
     val cornerRadiusDp: Int = 8,
     val opacity: Float = 1.0f,
-    val showLiveBadge: Boolean = true,
+    val showLiveBadge: Boolean = false,
     val showTimestamp: Boolean = false,
     val showCountdownBar: Boolean = true,
     val isFullscreen: Boolean = false,
@@ -61,7 +61,8 @@ data class CameraPipSpec(
     val isPinned: Boolean = false,
     val priority: String = "normal",
     val subtitleSafe: Boolean = false,
-    val actionsFocused: Boolean = false
+    val actionsFocused: Boolean = false,
+    val fadeEndOpacity: Float? = null
 ) : Parcelable {
     constructor(parcel: Parcel) : this(
         url = parcel.readString() ?: "",
@@ -99,7 +100,8 @@ data class CameraPipSpec(
         isPinned = parcel.readInt() != 0,
         priority = parcel.readString() ?: "normal",
         subtitleSafe = parcel.readInt() != 0,
-        actionsFocused = parcel.readInt() != 0
+        actionsFocused = parcel.readInt() != 0,
+        fadeEndOpacity = parcel.readFloat().let { if (it < 0f) null else it }
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -135,6 +137,7 @@ data class CameraPipSpec(
         parcel.writeString(priority)
         parcel.writeInt(if (subtitleSafe) 1 else 0)
         parcel.writeInt(if (actionsFocused) 1 else 0)
+        parcel.writeFloat(fadeEndOpacity ?: -1f)
     }
 
     override fun describeContents(): Int = 0

@@ -279,16 +279,32 @@ blueprint:
           default: 0.95
           selector:
             number:
-              min: 0.25
+              min: 0.20
               max: 1.0
               step: 0.05
         pip_opacity_helper:
           name: Live PiP Opacity Slider Helper (Optional)
-          description: Percent helper (25-100%) synced live to active TV PiPs when moved.
+          description: Percent helper (20-100%) synced live to active TV PiPs when moved.
           default: input_number.quickbars_pip_opacity
           selector:
             entity:
               domain: input_number
+        fade_opacity_helper:
+          name: Fade Opacity Toggle Helper (100% → Fade End %)
+          description: When ON, pop-ups start at 100% opacity and smoothly fade to the target % by end of display time.
+          default: input_boolean.quickbars_fade_opacity
+          selector:
+            entity:
+              domain: input_boolean
+        fade_end_opacity:
+          name: Fade End Opacity (%)
+          description: Target opacity at the end of auto-hide display time when Fade Opacity is ON.
+          default: 20
+          selector:
+            number:
+              min: 15
+              max: 100
+              unit_of_measurement: "%"
         multi_camera_mode_helper:
           name: Multi-Camera Behavior Helper (Optional)
           description: Controls Separate Corners, Auto Quad View, 2-Cam Split Dock, or Single Corner Replace.
@@ -306,12 +322,12 @@ blueprint:
               unit_of_measurement: dp
         show_title:
           name: Show Camera Title Badge
-          default: true
+          default: false
           selector:
             boolean: {}
         show_live_badge:
           name: Show Green LIVE Indicator
-          default: true
+          default: false
           selector:
             boolean: {}
         show_timestamp:
@@ -796,15 +812,23 @@ actions:
       corner_r: !input corner_radius_dp
       win_opacity: !input pip_opacity
       opacity_helper: !input pip_opacity_helper
+      fade_helper: !input fade_opacity_helper
+      fade_end_pct: !input fade_end_opacity
+      fade_enabled: "{{ (fade_helper | string | trim | length > 0) and is_state(fade_helper | string | trim, 'on') }}"
       multi_mode_helper: !input multi_camera_mode_helper
       eff_opacity: >
-        {% set raw = states(opacity_helper) %}
-        {% if is_number(raw) %}
-          {% set v = raw | float %}
-          {{ ([([ (v / 100.0 if v > 1.0 else v), 1.0 ] | min), 0.25] | max) | round(2) }}
+        {% if fade_enabled %}
+          1.0
         {% else %}
-          {{ ([([ (win_opacity | float), 1.0 ] | min), 0.25] | max) | round(2) }}
+          {% set raw = states(opacity_helper) %}
+          {% if is_number(raw) %}
+            {% set v = raw | float %}
+            {{ ([([ (v / 100.0 if v > 1.0 else v), 1.0 ] | min), 0.20] | max) | round(2) }}
+          {% else %}
+            {{ ([([ (win_opacity | float), 1.0 ] | min), 0.20] | max) | round(2) }}
+          {% endif %}
         {% endif %}
+      eff_fade_end: "{{ (([([ (fade_end_pct | float(20)), 100 ] | min), 15] | max) / 100.0) | round(2) if fade_enabled else '' }}"
       edge_margin: !input margin_dp
       show_live_flag: !input show_live_badge
       show_ts_flag: !input show_timestamp
@@ -1026,6 +1050,7 @@ actions:
                       border_width_dp: "{{ border_w | int }}"
                       corner_radius_dp: "{{ corner_r | int }}"
                       opacity: "{{ eff_opacity | float }}"
+                      fade_to_opacity: "{{ eff_fade_end }}"
                       margin_dp: "{{ edge_margin | int }}"
                       show_toast: "{{ show_toast_flag }}"
                       allow_multiple: false
@@ -1080,6 +1105,7 @@ actions:
                       border_width_dp: "{{ border_w | int }}"
                       corner_radius_dp: "{{ corner_r | int }}"
                       opacity: "{{ eff_opacity | float }}"
+                      fade_to_opacity: "{{ eff_fade_end }}"
                       margin_dp: "{{ edge_margin | int }}"
                       show_toast: "{{ show_toast_flag }}"
                       allow_multiple: false
@@ -1114,6 +1140,7 @@ actions:
                       border_width_dp: "{{ border_w | int }}"
                       corner_radius_dp: "{{ corner_r | int }}"
                       opacity: "{{ eff_opacity | float }}"
+                      fade_to_opacity: "{{ eff_fade_end }}"
                       margin_dp: "{{ edge_margin | int }}"
                       show_toast: "{{ show_toast_flag }}"
                       allow_multiple: "{{ allow_multi_flag }}"
@@ -1149,6 +1176,7 @@ actions:
                       border_width_dp: "{{ border_w | int }}"
                       corner_radius_dp: "{{ corner_r | int }}"
                       opacity: "{{ eff_opacity | float }}"
+                      fade_to_opacity: "{{ eff_fade_end }}"
                       margin_dp: "{{ edge_margin | int }}"
                       show_toast: "{{ show_toast_flag }}"
                       allow_multiple: "{{ allow_multi_flag }}"

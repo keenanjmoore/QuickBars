@@ -144,10 +144,14 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             borderColor = obj.optString("border_color", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             borderWidthDp = if (obj.has("border_width_dp") && !obj.isNull("border_width_dp")) obj.optInt("border_width_dp") else null,
             cornerRadiusDp = if (obj.has("corner_radius_dp") && !obj.isNull("corner_radius_dp")) obj.optInt("corner_radius_dp") else null,
-            opacity = if (obj.has("opacity") && !obj.isNull("opacity")) {
-                val raw = obj.optDouble("opacity", Double.NaN)
-                if (raw.isNaN()) null else (if (raw > 1.0) raw / 100.0 else raw).coerceIn(0.25, 1.0).toFloat()
-            } else null,
+            opacity = run {
+                val explicit = if (obj.has("opacity") && !obj.isNull("opacity")) {
+                    val raw = obj.optDouble("opacity", Double.NaN)
+                    if (raw.isNaN()) null else (if (raw > 1.0) raw / 100.0 else raw).coerceIn(0.15, 1.0).toFloat()
+                } else null
+                if (explicit == null && obj.optBoolean("fade_opacity", false)) 1.0f else explicit
+            },
+            fadeEndOpacity = parseFadeEndOpacity(obj),
             marginDp = if (obj.has("margin_dp") && !obj.isNull("margin_dp")) obj.optInt("margin_dp") else null,
             showLiveBadge = if (obj.has("show_live_badge") && !obj.isNull("show_live_badge")) obj.optBoolean("show_live_badge") else null,
             showTimestamp = if (obj.has("show_timestamp") && !obj.isNull("show_timestamp")) obj.optBoolean("show_timestamp") else null,
@@ -158,5 +162,28 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             actions = parsedActions,
             subtitleSafe = if (obj.has("subtitle_safe") && !obj.isNull("subtitle_safe")) obj.optBoolean("subtitle_safe") else null
         )
+    }
+
+    internal companion object {
+        private val FADE_KEYS = listOf("fade_to_opacity", "fade_end_opacity")
+
+        /**
+         * Parses target end-of-display fade opacity (`0.15..1.0`) from `fade_to_opacity` /
+         * `fade_end_opacity` (accepting 0..1 floats or 15..100 percentages), or defaults to `0.20f`
+         * when boolean `fade_opacity: true` is sent.
+         */
+        internal fun parseFadeEndOpacity(obj: JSONObject): Float? {
+            for (key in FADE_KEYS) {
+                if (!obj.has(key) || obj.isNull(key)) continue
+                val str = obj.optString(key, "").trim()
+                if (str.isEmpty() || str.equals("null", true) || str.equals("none", true)) continue
+                val num = str.toDoubleOrNull() ?: obj.optDouble(key, Double.NaN)
+                if (!num.isNaN() && num > 0.0) {
+                    val norm = if (num > 1.0) num / 100.0 else num
+                    return norm.coerceIn(0.15, 1.0).toFloat()
+                }
+            }
+            return if (obj.optBoolean("fade_opacity", false)) 0.20f else null
+        }
     }
 }

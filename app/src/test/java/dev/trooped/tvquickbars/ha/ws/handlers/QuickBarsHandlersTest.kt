@@ -151,4 +151,14 @@ class QuickBarsHandlersTest {
         assertTrue(AppUpdateManager.compareSemVer("v1.8.0", "1.7.0") > 0)
         assertEquals(0, AppUpdateManager.compareSemVer("v1.8.0", "1.8.0"))
     }
+
+    @Test
+    fun parse_fade_end_opacity_handles_percent_fraction_boolean_and_blank() {
+        assertEquals(0.20f, QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject().put("fade_to_opacity", 20))!!, 0.001f)
+        assertEquals(0.20f, QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject().put("fade_to_opacity", 0.20))!!, 0.001f)
+        assertEquals(0.20f, QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject().put("fade_opacity", true))!!, 0.001f)
+        assertNull(QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject().put("fade_to_opacity", "")))
+        assertNull(QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject().put("fade_to_opacity", "none")))
+        assertNull(QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject()))
+    }
 }

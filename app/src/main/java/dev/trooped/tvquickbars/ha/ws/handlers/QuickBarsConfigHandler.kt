@@ -106,7 +106,7 @@ class QuickBarsConfigHandler : WsHandler {
         }
         val rawOpacity = normalizeOpacity(data)
         if (!rawOpacity.isNaN()) {
-            val norm = (if (rawOpacity > 1.0) rawOpacity / 100.0 else rawOpacity).coerceIn(0.25, 1.0).toFloat()
+            val norm = (if (rawOpacity > 1.0) rawOpacity / 100.0 else rawOpacity).coerceIn(0.15, 1.0).toFloat()
             AppPrefs.setDefaultPipOpacity(context, norm)
             BackgroundHaConnectionManager.applyLiveOpacityToActivePips(norm)
             changed = true

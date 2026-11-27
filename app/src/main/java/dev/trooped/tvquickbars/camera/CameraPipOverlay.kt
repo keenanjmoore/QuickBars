@@ -154,10 +154,9 @@ fun CameraPipOverlay(
                         )
                     }
                 }
-                if (spec.isPinned || spec.priority == "critical" || spec.priority == "high") {
+                if (spec.isPinned) {
                     PipStatusPills(
                         isPinned = spec.isPinned,
-                        priority = spec.priority,
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .padding(6.dp)
@@ -225,7 +224,6 @@ private fun PipQuickActionBar(
 @Composable
 private fun PipStatusPills(
     isPinned: Boolean,
-    priority: String,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -241,17 +239,6 @@ private fun PipStatusPills(
                 color = Color(0xFF38BDF8),
                 modifier = Modifier
                     .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 5.dp, vertical = 2.dp)
-            )
-        }
-        if (priority == "critical") {
-            Text(
-                text = "DOORBELL",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFFFCA5A5),
-                modifier = Modifier
-                    .background(Color(0xFF7F1D1D).copy(alpha = 0.8f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 5.dp, vertical = 2.dp)
             )
         }
@@ -508,7 +495,7 @@ fun SingleCameraFeedView(
     val density = LocalDensity.current.density
     val targetPxW = remember(spec.widthDp, density) { (spec.widthDp * density).toInt().coerceAtLeast(160) }
     val targetPxH = remember(spec.heightDp, density) { (spec.heightDp * density).toInt().coerceAtLeast(90) }
-    val useSurfaceView = !spec.isGroup && spec.opacity >= 0.99f && spec.cornerRadiusDp == 0
+    val useSurfaceView = !spec.isGroup && spec.opacity >= 0.99f && spec.fadeEndOpacity == null && spec.cornerRadiusDp == 0
 
     Box(modifier = Modifier.fillMaxSize()) {
         val isExoStream = remember(spec.url) {

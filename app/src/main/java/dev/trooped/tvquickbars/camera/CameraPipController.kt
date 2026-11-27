@@ -1,5 +1,6 @@
 package dev.trooped.tvquickbars.camera
 
+import android.animation.ValueAnimator
 import android.app.ActivityManager
 import android.content.Context
 import android.graphics.PixelFormat
@@ -16,6 +17,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.LinearInterpolator
 import android.widget.Toast
 import androidx.annotation.MainThread
 import androidx.compose.foundation.layout.Box
@@ -45,6 +47,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 data class PipDiagnosticsSnapshot(
@@ -81,7 +84,8 @@ class CameraPipController(
         var hideRunnable: Runnable,
         val countdownResetMs: MutableState<Long> = mutableStateOf(System.currentTimeMillis()),
         val openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
-        var autoUnfocusRunnable: Runnable? = null
+        var autoUnfocusRunnable: Runnable? = null,
+        var fadeAnimator: ValueAnimator? = null
     ) {
         val spec: CameraPipSpec get() = specState.value
     }
@@ -211,16 +215,27 @@ class CameraPipController(
         }
     }
 
-    /** Pins or unpins the most recent PiP overlay, cancelling or restoring its auto-hide timer. */
+    /** Pins or unpins the most recent PiP overlay, cancelling or restoring its auto-hide and fade timers. */
     @MainThread
     fun togglePinMostRecentPip(): Unit = runOnMain {
         val instance = activeOverlays.values.lastOrNull() ?: return@runOnMain
         val nextPinned = !instance.spec.isPinned
         mainHandler.removeCallbacks(instance.hideRunnable)
-        if (!nextPinned && instance.spec.autoHideTimeout > 0) {
-            mainHandler.postDelayed(instance.hideRunnable, instance.spec.autoHideTimeout * 1000L)
-        }
+        instance.fadeAnimator?.cancel()
+        instance.fadeAnimator = null
         instance.specState.value = instance.spec.copy(isPinned = nextPinned)
+        if (nextPinned) {
+            val fullAlpha = instance.spec.opacity.coerceIn(0.15f, 1.0f)
+            instance.layoutParams.alpha = fullAlpha
+            if (instance.view.isAttachedToWindow) {
+                runCatching { windowManager.updateViewLayout(instance.view, instance.layoutParams) }
+            }
+        } else {
+            if (instance.spec.autoHideTimeout > 0) {
+                mainHandler.postDelayed(instance.hideRunnable, instance.spec.autoHideTimeout * 1000L)
+            }
+            startFadeAnimatorIfNeeded(instance)
+        }
         showToast(if (nextPinned) "Camera pinned" else "Camera unpinned")
     }
 
@@ -422,7 +437,7 @@ class CameraPipController(
             widthDp = wDp,
             heightDp = hDp,
             marginDp = 20,
-            showTitle = req.showTitle ?: true,
+            showTitle = req.showTitle ?: false,
             cornerPosition = corner,
             autoHideTimeout = autoHide,
             slotKey = slotKey,
@@ -573,9 +588,15 @@ class CameraPipController(
                         mainHandler.removeCallbacks(existing.hideRunnable)
                         existing.countdownResetMs.value = System.currentTimeMillis()
                         val newTimeout = spec.autoHideTimeout
+                        existing.specState.value = existing.spec.copy(
+                            autoHideTimeout = newTimeout,
+                            opacity = spec.opacity,
+                            fadeEndOpacity = spec.fadeEndOpacity
+                        )
                         if (newTimeout > 0) {
                             mainHandler.postDelayed(existing.hideRunnable, newTimeout * 1000L)
                         }
+                        startFadeAnimatorIfNeeded(existing)
                         Log.d(TAG, "Extended active PiP countdown in slot $slotKey to ${newTimeout}s")
                         return@runOnMain
                     }
@@ -715,12 +736,13 @@ class CameraPipController(
             gravity = if (spec.isFullscreen) Gravity.CENTER else gravityForCorner(spec.cornerPosition)
             x = marginPx
             y = marginPx
-            alpha = spec.opacity.coerceIn(0.25f, 1.0f)
+            alpha = spec.opacity.coerceIn(0.15f, 1.0f)
         }
 
+        val instance: ActivePipInstance
         try {
             windowManager.addView(view, params)
-            activeOverlays[slotKey] = ActivePipInstance(
+            instance = ActivePipInstance(
                 slotKey = slotKey,
                 specState = specState,
                 view = view,
@@ -730,6 +752,7 @@ class CameraPipController(
                 countdownResetMs = countdownResetMs,
                 openedAtElapsedMs = openedAtElapsedMs
             )
+            activeOverlays[slotKey] = instance
             syncActiveTelemetry()
         } catch (e: Exception) {
             Log.e(TAG, "Error adding camera overlay to WindowManager for slot $slotKey", e)
@@ -742,6 +765,7 @@ class CameraPipController(
         if (timeout > 0) {
             mainHandler.postDelayed(hideRunnable, timeout * 1000L)
         }
+        startFadeAnimatorIfNeeded(instance)
     }
 
     @MainThread
@@ -780,9 +804,11 @@ class CameraPipController(
     @MainThread
     fun updateActiveOpacity(opacity: Float): Unit = runOnMain {
         val normalized = if (opacity > 1.0f) opacity / 100.0f else opacity
-        val clamped = normalized.coerceIn(0.25f, 1.0f)
+        val clamped = normalized.coerceIn(0.15f, 1.0f)
         for ((slotKey, instance) in activeOverlays) {
             try {
+                instance.fadeAnimator?.cancel()
+                instance.fadeAnimator = null
                 instance.layoutParams.alpha = clamped
                 if (instance.view.isAttachedToWindow) {
                     windowManager.updateViewLayout(instance.view, instance.layoutParams)
@@ -845,6 +871,8 @@ class CameraPipController(
     private fun teardownOverlay(slotKey: String) {
         val instance = activeOverlays.remove(slotKey) ?: return
         activeCodecsBySlot.remove(slotKey)
+        instance.fadeAnimator?.cancel()
+        instance.fadeAnimator = null
         mainHandler.removeCallbacks(instance.hideRunnable)
         instance.autoUnfocusRunnable?.let { mainHandler.removeCallbacks(it) }
 
@@ -893,7 +921,7 @@ class CameraPipController(
         val corner = mapCornerOverride(req.position) ?: defaultCorner
         val (wDp, hDp) = chooseSize(req, defaultSize)
         val autoHide = req.autoHideSec ?: AppPrefs.getDefaultCameraAutoHideSeconds(context)
-        val showTitle = req.showTitle ?: true
+        val showTitle = req.showTitle ?: false
         val title = req.customTitle?.takeIf { !it.isNullish() }?.trim() ?: "Camera"
 
         val transport = when (req.rtspTransport?.lowercase()) {
@@ -979,7 +1007,9 @@ class CameraPipController(
             req.layout.equals("fullscreen", ignoreCase = true) ||
             base.isFullscreen
         val rawOpacity = req.opacity ?: AppPrefs.getDefaultPipOpacity(context)
-        val normOpacity = (if (rawOpacity > 1.0f) rawOpacity / 100.0f else rawOpacity).coerceIn(0.25f, 1.0f)
+        val normOpacity = (if (rawOpacity > 1.0f) rawOpacity / 100.0f else rawOpacity).coerceIn(0.15f, 1.0f)
+        val rawFadeEnd = req.fadeEndOpacity ?: base.fadeEndOpacity
+        val normFade = rawFadeEnd?.let { (if (it > 1.0f) it / 100.0f else it).coerceIn(0.15f, 1.0f) }
         val subSafe = req.subtitleSafe ?: base.subtitleSafe
         return base.copy(
             borderColorHex = borderColor,
@@ -994,8 +1024,54 @@ class CameraPipController(
             cid = req.cid ?: base.cid,
             actions = if (req.actions.isNotEmpty()) req.actions else base.actions,
             priority = req.priority?.lowercase() ?: base.priority,
-            subtitleSafe = subSafe
+            subtitleSafe = subSafe,
+            fadeEndOpacity = normFade
         )
+    }
+
+    /** Linearly fades an active PiP window from `spec.opacity` down to `spec.fadeEndOpacity` over `autoHideTimeout`. */
+    private fun startFadeAnimatorIfNeeded(instance: ActivePipInstance) {
+        instance.fadeAnimator?.cancel()
+        instance.fadeAnimator = null
+
+        val startAlpha = instance.spec.opacity.coerceIn(0.15f, 1.0f)
+        val endAlpha = instance.spec.fadeEndOpacity ?: return
+        val timeoutSec = instance.spec.autoHideTimeout
+        if (instance.spec.isPinned || timeoutSec <= 0 || endAlpha >= startAlpha - 0.01f) {
+            instance.layoutParams.alpha = startAlpha
+            if (instance.view.isAttachedToWindow) {
+                runCatching { windowManager.updateViewLayout(instance.view, instance.layoutParams) }
+            }
+            return
+        }
+
+        instance.layoutParams.alpha = startAlpha
+        if (instance.view.isAttachedToWindow) {
+            runCatching { windowManager.updateViewLayout(instance.view, instance.layoutParams) }
+        }
+
+        var lastApplied = startAlpha
+        val anim = ValueAnimator.ofFloat(startAlpha, endAlpha).apply {
+            duration = timeoutSec * 1000L
+            interpolator = LinearInterpolator()
+            addUpdateListener { va ->
+                val v = (va.animatedValue as? Float) ?: return@addUpdateListener
+                if (activeOverlays[instance.slotKey] !== instance) {
+                    va.cancel()
+                    return@addUpdateListener
+                }
+                if (abs(v - lastApplied) >= 0.015f || v <= endAlpha + 0.005f) {
+                    lastApplied = v
+                    instance.layoutParams.alpha = v
+                    if (instance.view.isAttachedToWindow) {
+                        runCatching { windowManager.updateViewLayout(instance.view, instance.layoutParams) }
+                    }
+                }
+            }
+        }
+        instance.fadeAnimator = anim
+        anim.start()
+        Log.i(TAG, "FADE_OPACITY_START slot=${instance.slotKey} from=$startAlpha to=$endAlpha durationSec=$timeoutSec")
     }
 
     internal companion object {
@@ -1158,7 +1234,7 @@ class CameraPipController(
 
         val defaultCorner = (entity.lastKnownState["pip_corner"] as? String) ?: "TOP_LEFT"
         val defaultSize = (entity.lastKnownState["pip_size"] as? String) ?: "MEDIUM"
-        val defaultTitle = (entity.lastKnownState["show_title"] as? Boolean) ?: true
+        val defaultTitle = (entity.lastKnownState["show_title"] as? Boolean) ?: false
         val defaultAuto = ((entity.lastKnownState["auto_hide_timeout"] as? Number)?.toInt())
             ?: ((entity.lastKnownState["auto_hide_timeout"] as? String)?.toIntOrNull())
             ?: AppPrefs.getDefaultCameraAutoHideSeconds(context)

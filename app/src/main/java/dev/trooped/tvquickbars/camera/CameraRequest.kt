@@ -34,7 +34,8 @@ data class CameraRequest(
     val borderColor: String? = null,      // "#RRGGBB" accent border around PiP
     val borderWidthDp: Int? = null,       // 0..8 dp
     val cornerRadiusDp: Int? = null,      // 0..24 dp
-    val opacity: Float? = null,           // 0.25..1.0 window alpha
+    val opacity: Float? = null,           // 0.15..1.0 window alpha
+    val fadeEndOpacity: Float? = null,    // optional target alpha (0.15..1.0) to fade toward over autoHideSec
     val marginDp: Int? = null,            // 0..64 dp outer screen edge offset
     val showLiveBadge: Boolean? = null,   // true = green LIVE pill
     val showTimestamp: Boolean? = null,   // true = HH:mm:ss clock badge

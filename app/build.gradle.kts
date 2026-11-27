@@ -12,8 +12,8 @@ android {
         applicationId = "dev.trooped.tvquickbars"
         minSdk = 28
         targetSdk = 35
-        versionCode = 36
-        versionName = "1.8.0"
+        versionCode = 37
+        versionName = "1.8.1"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
