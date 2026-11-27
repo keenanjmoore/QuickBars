@@ -1,6 +1,5 @@
 package dev.trooped.tvquickbars.camera
 
-import android.animation.ValueAnimator
 import android.app.ActivityManager
 import android.content.Context
 import android.graphics.PixelFormat
@@ -17,7 +16,6 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
-import android.view.animation.LinearInterpolator
 import android.widget.Toast
 import androidx.annotation.MainThread
 import androidx.compose.foundation.layout.Box
@@ -85,7 +83,7 @@ class CameraPipController(
         val countdownResetMs: MutableState<Long> = mutableStateOf(System.currentTimeMillis()),
         val openedAtElapsedMs: Long = SystemClock.elapsedRealtime(),
         var autoUnfocusRunnable: Runnable? = null,
-        var fadeAnimator: ValueAnimator? = null
+        var fadeRunnable: Runnable? = null
     ) {
         val spec: CameraPipSpec get() = specState.value
     }
@@ -221,8 +219,7 @@ class CameraPipController(
         val instance = activeOverlays.values.lastOrNull() ?: return@runOnMain
         val nextPinned = !instance.spec.isPinned
         mainHandler.removeCallbacks(instance.hideRunnable)
-        instance.fadeAnimator?.cancel()
-        instance.fadeAnimator = null
+        cancelFade(instance)
         instance.specState.value = instance.spec.copy(isPinned = nextPinned)
         if (nextPinned) {
             val fullAlpha = instance.spec.opacity.coerceIn(0.15f, 1.0f)
@@ -807,8 +804,7 @@ class CameraPipController(
         val clamped = normalized.coerceIn(0.15f, 1.0f)
         for ((slotKey, instance) in activeOverlays) {
             try {
-                instance.fadeAnimator?.cancel()
-                instance.fadeAnimator = null
+                cancelFade(instance)
                 instance.layoutParams.alpha = clamped
                 if (instance.view.isAttachedToWindow) {
                     windowManager.updateViewLayout(instance.view, instance.layoutParams)
@@ -871,8 +867,7 @@ class CameraPipController(
     private fun teardownOverlay(slotKey: String) {
         val instance = activeOverlays.remove(slotKey) ?: return
         activeCodecsBySlot.remove(slotKey)
-        instance.fadeAnimator?.cancel()
-        instance.fadeAnimator = null
+        cancelFade(instance)
         mainHandler.removeCallbacks(instance.hideRunnable)
         instance.autoUnfocusRunnable?.let { mainHandler.removeCallbacks(it) }
 
@@ -1029,10 +1024,18 @@ class CameraPipController(
         )
     }
 
-    /** Linearly fades an active PiP window from `spec.opacity` down to `spec.fadeEndOpacity` over `autoHideTimeout`. */
+    private fun cancelFade(instance: ActivePipInstance) {
+        instance.fadeRunnable?.let { mainHandler.removeCallbacks(it) }
+        instance.fadeRunnable = null
+    }
+
+    /**
+     * Linearly fades an active PiP window from `spec.opacity` down to `spec.fadeEndOpacity` over
+     * wall-clock `autoHideTimeout` seconds (`SystemClock.elapsedRealtime`), independent of Android's
+     * global `ANIMATOR_DURATION_SCALE` setting.
+     */
     private fun startFadeAnimatorIfNeeded(instance: ActivePipInstance) {
-        instance.fadeAnimator?.cancel()
-        instance.fadeAnimator = null
+        cancelFade(instance)
 
         val startAlpha = instance.spec.opacity.coerceIn(0.15f, 1.0f)
         val endAlpha = instance.spec.fadeEndOpacity ?: return
@@ -1050,32 +1053,44 @@ class CameraPipController(
             runCatching { windowManager.updateViewLayout(instance.view, instance.layoutParams) }
         }
 
+        val startElapsed = SystemClock.elapsedRealtime()
+        val durationMs = timeoutSec * 1000L
         var lastApplied = startAlpha
-        val anim = ValueAnimator.ofFloat(startAlpha, endAlpha).apply {
-            duration = timeoutSec * 1000L
-            interpolator = LinearInterpolator()
-            addUpdateListener { va ->
-                val v = (va.animatedValue as? Float) ?: return@addUpdateListener
+        val tick = object : Runnable {
+            override fun run() {
                 if (activeOverlays[instance.slotKey] !== instance) {
-                    va.cancel()
-                    return@addUpdateListener
+                    instance.fadeRunnable = null
+                    return
                 }
-                if (abs(v - lastApplied) >= 0.015f || v <= endAlpha + 0.005f) {
+                val elapsed = (SystemClock.elapsedRealtime() - startElapsed).coerceAtLeast(0L)
+                val v = computeFadeAlpha(startAlpha, endAlpha, elapsed, durationMs)
+                if (abs(v - lastApplied) >= 0.01f || elapsed >= durationMs) {
                     lastApplied = v
                     instance.layoutParams.alpha = v
                     if (instance.view.isAttachedToWindow) {
                         runCatching { windowManager.updateViewLayout(instance.view, instance.layoutParams) }
                     }
                 }
+                if (elapsed < durationMs) {
+                    mainHandler.postDelayed(this, 150L)
+                } else {
+                    instance.fadeRunnable = null
+                }
             }
         }
-        instance.fadeAnimator = anim
-        anim.start()
+        instance.fadeRunnable = tick
+        mainHandler.postDelayed(tick, 150L)
         Log.i(TAG, "FADE_OPACITY_START slot=${instance.slotKey} from=$startAlpha to=$endAlpha durationSec=$timeoutSec")
     }
 
     internal companion object {
         private val snapshotCache = ConcurrentHashMap<String, Pair<Long, ByteArray>>()
+
+        internal fun computeFadeAlpha(startAlpha: Float, endAlpha: Float, elapsedMs: Long, durationMs: Long): Float {
+            if (durationMs <= 0L) return endAlpha
+            val frac = (elapsedMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+            return startAlpha + (endAlpha - startAlpha) * frac
+        }
 
         fun putPrefetchedSnapshot(url: String, bytes: ByteArray) {
             if (snapshotCache.size > 6) {

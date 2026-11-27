@@ -160,5 +160,9 @@ class QuickBarsHandlersTest {
         assertNull(QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject().put("fade_to_opacity", "")))
         assertNull(QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject().put("fade_to_opacity", "none")))
         assertNull(QuickBarsOpenHandler.parseFadeEndOpacity(JSONObject()))
+
+        assertEquals(1.00f, CameraPipController.computeFadeAlpha(1.0f, 0.20f, 0L, 25_000L), 0.001f)
+        assertEquals(0.60f, CameraPipController.computeFadeAlpha(1.0f, 0.20f, 12_500L, 25_000L), 0.001f)
+        assertEquals(0.20f, CameraPipController.computeFadeAlpha(1.0f, 0.20f, 25_000L, 25_000L), 0.001f)
     }
 }
