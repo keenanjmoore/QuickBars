@@ -7,8 +7,12 @@ import android.os.Parcelable
 import android.util.Log
 import android.widget.Toast
 import androidx.annotation.OptIn
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,11 +35,15 @@ import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.InputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.coroutines.coroutineContext
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer
@@ -47,6 +55,15 @@ import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import dev.trooped.tvquickbars.R
 import dev.trooped.tvquickbars.utils.SharedHttpClients
 
+private fun parseBorderColor(hex: String?): Color? {
+    val clean = hex?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return try {
+        Color(android.graphics.Color.parseColor(clean))
+    } catch (_: Throwable) {
+        null
+    }
+}
+
 /**
  * Composable function to display a camera Picture-in-Picture (PiP) overlay.
  * Supports single camera views as well as multi-camera split and grid arrangements.
@@ -54,18 +71,109 @@ import dev.trooped.tvquickbars.utils.SharedHttpClients
 @Composable
 fun CameraPipOverlay(
     spec: CameraPipSpec,
+    countdownResetKey: Long = 0L,
     onClose: () -> Unit = {}
 ) {
+    val shape = RoundedCornerShape(spec.cornerRadiusDp.coerceIn(0, 24).dp)
+    val borderColor = remember(spec.borderColorHex) { parseBorderColor(spec.borderColorHex) }
+    val borderMod = if (borderColor != null && spec.borderWidthDp > 0) {
+        Modifier.border(spec.borderWidthDp.coerceIn(1, 8).dp, borderColor, shape)
+    } else {
+        Modifier
+    }
+
     if (spec.isGroup && spec.groupSpecs.isNotEmpty()) {
-        MultiCameraPipOverlay(spec = spec, onClose = onClose)
+        Box(
+            modifier = Modifier
+                .requiredSize(spec.widthDp.dp, spec.heightDp.dp)
+                .clip(shape)
+                .then(borderMod)
+        ) {
+            MultiCameraPipOverlay(spec = spec, onClose = onClose)
+            PipCountdownBar(
+                spec = spec,
+                accentColor = borderColor,
+                resetKey = countdownResetKey,
+                modifier = Modifier.align(Alignment.BottomStart)
+            )
+        }
     } else {
         Box(
             modifier = Modifier
                 .requiredSize(spec.widthDp.dp, spec.heightDp.dp)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(shape)
+                .then(borderMod)
         ) {
             SingleCameraFeedView(spec)
+            PipTimestampBadge(
+                visible = spec.showTimestamp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+            )
+            PipCountdownBar(
+                spec = spec,
+                accentColor = borderColor,
+                resetKey = countdownResetKey,
+                modifier = Modifier.align(Alignment.BottomStart)
+            )
         }
+    }
+}
+
+@Composable
+private fun PipTimestampBadge(
+    visible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (!visible) return
+    val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    var clock by remember { mutableStateOf(fmt.format(Date())) }
+    LaunchedEffect(visible) {
+        while (isActive) {
+            clock = fmt.format(Date())
+            delay(1000L)
+        }
+    }
+    Text(
+        text = clock,
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.Medium,
+        color = Color.White,
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    )
+}
+
+@Composable
+private fun PipCountdownBar(
+    spec: CameraPipSpec,
+    accentColor: Color?,
+    resetKey: Long,
+    modifier: Modifier = Modifier
+) {
+    if (!spec.showCountdownBar || spec.autoHideTimeout <= 0) return
+    val progress = remember { Animatable(1f) }
+    LaunchedEffect(spec.autoHideTimeout, resetKey) {
+        progress.snapTo(1f)
+        progress.animateTo(
+            targetValue = 0f,
+            animationSpec = tween(durationMillis = spec.autoHideTimeout * 1000, easing = LinearEasing)
+        )
+    }
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(Color.Black.copy(alpha = 0.35f))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(fraction = progress.value.coerceIn(0f, 1f))
+                .background(accentColor ?: Color(0xFF38BDF8))
+        )
     }
 }
 
@@ -82,8 +190,7 @@ fun MultiCameraPipOverlay(
 
     Box(
         modifier = Modifier
-            .requiredSize(spec.widthDp.dp, spec.heightDp.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f))
             .padding(4.dp)
     ) {
@@ -189,6 +296,30 @@ fun MultiCameraPipOverlay(
     }
 }
 
+@Composable
+private fun PipLiveBadge(modifier: Modifier = Modifier) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(Color(0xFF4ADE80))
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = "LIVE",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+    }
+}
+
 /**
  * Individual camera feed container (MJPEG or ExoPlayer).
  */
@@ -207,12 +338,14 @@ fun SingleCameraFeedView(spec: CameraPipSpec) {
                 config = spec.rtspProfile,
                 snapshotUrl = spec.snapshotUrl,
                 authToken = spec.authToken,
+                showLiveBadge = spec.showLiveBadge,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
             CameraMjpegView(
                 url = spec.url,
                 authToken = spec.authToken,
+                showLiveBadge = spec.showLiveBadge,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -310,6 +443,7 @@ private fun CameraRtspView(
     config: RtspProfile,
     snapshotUrl: String? = null,
     authToken: String? = null,
+    showLiveBadge: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -320,6 +454,8 @@ private fun CameraRtspView(
     var isFirstFrameRendered by remember(url, config) { mutableStateOf(false) }
     var pendingRetry by remember(url, config) { mutableStateOf(false) }
     var snapshotBmp by remember(snapshotUrl) { mutableStateOf<Bitmap?>(null) }
+    var videoW by remember(url, config) { mutableStateOf(0) }
+    var videoH by remember(url, config) { mutableStateOf(0) }
 
     // Option A6: Snapshot-first PiP (show instant JPEG frame while RTSP negotiates)
     LaunchedEffect(snapshotUrl, authToken) {
@@ -390,7 +526,7 @@ private fun CameraRtspView(
 
             val mediaSource = if (url.startsWith("rtsp://", ignoreCase = true)) {
                 val rtspFactory = androidx.media3.exoplayer.rtsp.RtspMediaSource.Factory()
-                    .setTimeoutMs(4000)
+                    .setTimeoutMs(25000)
 
                 when (config.transport) {
                     TransportProtocol.TCP -> rtspFactory.setForceUseRtpTcp(true)
@@ -425,16 +561,23 @@ private fun CameraRtspView(
                     videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
                     addListener(object : androidx.media3.common.Player.Listener {
+                        override fun onVideoSizeChanged(videoSize: VideoSize) {
+                            videoW = videoSize.width
+                            videoH = videoSize.height
+                        }
+
                         override fun onRenderedFirstFrame() {
                             isFirstFrameRendered = true
                             retryCount = 0
                             showDebug = false
                             lastError = null
+                            Log.i("CameraRtspView", "FIRST_FRAME url=$url size=${videoW}x${videoH}")
                         }
 
                         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                             val cause = error.cause?.message ?: "Unknown"
                             lastError = "Code: ${error.errorCodeName}\n$cause"
+                            Log.e("CameraRtspView", "PLAYBACK_ERROR url=$url code=${error.errorCodeName} msg=$cause")
                             if (retryCount < 5) {
                                 retryCount += 1
                                 isFirstFrameRendered = false
@@ -471,31 +614,34 @@ private fun CameraRtspView(
                     modifier = Modifier.fillMaxSize(),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
                 )
-            }
-
-            if (isFirstFrameRendered && !showDebug) {
+            } else if (!isFirstFrameRendered && snapshotBmp == null && !showDebug) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Text(
+                        text = "Connecting…",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White.copy(alpha = 0.9f)
+                    )
+                }
+            }
+
+            if (showLiveBadge && isFirstFrameRendered && !showDebug) {
+                PipLiveBadge(
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(6.dp)
-                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF4ADE80))
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = "LIVE",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                }
+                )
             }
 
             if (showDebug) {
@@ -596,6 +742,7 @@ class SoftwarePreferredCodecSelector : MediaCodecSelector {
 fun CameraMjpegView(
     url: String,
     authToken: String?,
+    showLiveBadge: Boolean = true,
     modifier: Modifier = Modifier.fillMaxSize()
 ) {
     val tag = "CameraMjpegView"
@@ -604,10 +751,12 @@ fun CameraMjpegView(
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    var loggedFirstFrame by remember(url) { mutableStateOf(false) }
 
     LaunchedEffect(url, authToken) {
         error = null
         isLoading = true
+        loggedFirstFrame = false
         var attempt = 0
         var reusableBmp: Bitmap? = null
 
@@ -634,6 +783,10 @@ fun CameraMjpegView(
                                     reusableBmp = decoded
                                     bitmap = decoded
                                     error = null
+                                    if (!loggedFirstFrame) {
+                                        loggedFirstFrame = true
+                                        Log.i(tag, "MJPEG_FIRST_FRAME url=$url size=${decoded.width}x${decoded.height}")
+                                    }
                                     if (isLoading) isLoading = false
                                 }
                             }
@@ -656,12 +809,21 @@ fun CameraMjpegView(
 
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         when {
-            bitmap != null -> Image(
-                bitmap = bitmap!!.asImageBitmap(),
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop
-            )
+            bitmap != null -> {
+                Image(
+                    bitmap = bitmap!!.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+                if (showLiveBadge) {
+                    PipLiveBadge(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(6.dp)
+                    )
+                }
+            }
             error != null -> Text(
                 "Camera error: $error",
                 modifier = Modifier.padding(16.dp),

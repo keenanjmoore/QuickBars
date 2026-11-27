@@ -43,7 +43,15 @@ data class CameraPipSpec(
     val groupSpecs: List<CameraPipSpec> = emptyList(),
     val groupLayout: String = "grid",
     val autoCloseOnSleep: Boolean = true,
-    val snapshotUrl: String? = null
+    val snapshotUrl: String? = null,
+    val borderColorHex: String? = null,
+    val borderWidthDp: Int = 0,
+    val cornerRadiusDp: Int = 8,
+    val opacity: Float = 1.0f,
+    val showLiveBadge: Boolean = true,
+    val showTimestamp: Boolean = false,
+    val showCountdownBar: Boolean = true,
+    val isFullscreen: Boolean = false
 ) : Parcelable {
     constructor(parcel: Parcel) : this(
         url = parcel.readString() ?: "",
@@ -64,7 +72,15 @@ data class CameraPipSpec(
         },
         groupLayout = parcel.readString() ?: "grid",
         autoCloseOnSleep = parcel.readInt() != 0,
-        snapshotUrl = parcel.readString()
+        snapshotUrl = parcel.readString(),
+        borderColorHex = parcel.readString(),
+        borderWidthDp = parcel.readInt(),
+        cornerRadiusDp = parcel.readInt(),
+        opacity = parcel.readFloat(),
+        showLiveBadge = parcel.readInt() != 0,
+        showTimestamp = parcel.readInt() != 0,
+        showCountdownBar = parcel.readInt() != 0,
+        isFullscreen = parcel.readInt() != 0
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -86,6 +102,14 @@ data class CameraPipSpec(
         parcel.writeString(groupLayout)
         parcel.writeInt(if (autoCloseOnSleep) 1 else 0)
         parcel.writeString(snapshotUrl)
+        parcel.writeString(borderColorHex)
+        parcel.writeInt(borderWidthDp)
+        parcel.writeInt(cornerRadiusDp)
+        parcel.writeFloat(opacity)
+        parcel.writeInt(if (showLiveBadge) 1 else 0)
+        parcel.writeInt(if (showTimestamp) 1 else 0)
+        parcel.writeInt(if (showCountdownBar) 1 else 0)
+        parcel.writeInt(if (isFullscreen) 1 else 0)
     }
 
     override fun describeContents(): Int = 0

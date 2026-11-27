@@ -1,0 +1,952 @@
+blueprint:
+  name: "QuickBars Smart TV Camera & Alert Suite (v1.6)"
+  description: >
+    All-in-one QuickBars v1.6 Smart TV automation blueprint unifying motion & doorbell camera RTSP/HA-proxy
+    PiP pop-ups, snapshot-first frame preloading, non-overlapping corner collision resolution, awake-only
+    targeting, full visual HUD styling (borders, corner radius, countdown bar, clock badge, fullscreen
+    doorbell takeover), Android TV spoken TTS alerts, actionable snapshot cards, helper config sync,
+    automatic Cinema DND, Shield offline watchdogs, and post-playback AccessibilityService rebind.
+  domain: automation
+  source_url: https://github.com/keenanjmoore/QuickBars/blob/main/ha_blueprints/quickbars_smart_tv_suite.yaml
+  homeassistant:
+    min_version: 2024.6.0
+  input:
+    # ── 1. Triggers, Cooldown & Presence Guards ────────────────────────────────
+    triggers_and_guards:
+      name: "1. Triggers, Cooldown & Presence"
+      icon: mdi:motion-sensor
+      collapsed: false
+      input:
+        master_enable_helper:
+          name: Master PiP Enable Helper
+          description: Boolean helper that gates camera PiP & snapshot alerts (fleet maintenance still runs).
+          default: input_boolean.quickbars_pip_enabled
+          selector:
+            entity:
+              domain: input_boolean
+        person_binary_sensors:
+          name: Person / Motion / Visitor Binary Sensors
+          description: Binary sensors (Reolink, Frigate occupancy, etc.) that trigger camera PiP on 'on'.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: binary_sensor
+        camera_event_entities:
+          name: Camera / Doorbell Event Entities
+          description: Nest / Event entities (motion or chime) that trigger camera PiP.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: event
+        per_camera_cooldown_seconds:
+          name: Sensor Bounce Cooldown (Seconds)
+          description: Minimum off-to-on gap for binary sensors before re-triggering (0 disables).
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 120
+              unit_of_measurement: s
+        optional_home_presence_entity:
+          name: Optional Presence Filter Entity
+          description: Optional zone/person/input_boolean entity that must be 'home' or 'on' (leave empty to always run).
+          default: ""
+          selector:
+            text: {}
+
+    # ── 2. Camera, go2rtc & Snapshot Mapping ───────────────────────────────────
+    camera_sources:
+      name: "2. Cameras, go2rtc & Snapshot-First"
+      icon: mdi:cctv
+      collapsed: false
+      input:
+        go2rtc_rtsp_host:
+          name: go2rtc RTSP Host:Port
+          description: Host and port serving RTSP streams (no ?video query suffix).
+          default: "192.168.1.146:8554"
+          selector:
+            text: {}
+        trigger_camera_map:
+          name: Trigger -> Camera / RTSP Map (YAML/Dict)
+          description: >
+            Mapping from trigger entity_id to {camera, rtsp, title, default_corner}.
+          default: {}
+          selector:
+            object: {}
+        fallback_camera_entity:
+          name: Fallback Camera Entity (Optional)
+          description: Used if a triggering entity is missing from Trigger -> Camera Map.
+          default: ""
+          selector:
+            text: {}
+        enable_snapshot_first:
+          name: Snapshot-First Preload Over HA Proxy
+          description: Pass authenticated HA snapshot_entity alongside RTSP so an instant still renders while ExoPlayer negotiates.
+          default: true
+          selector:
+            boolean: {}
+
+    # ── 3. Smart TV Fleet Targeting ────────────────────────────────────────────
+    tv_fleet_section:
+      name: "3. Smart TV Fleet & Targeting"
+      icon: mdi:television-multiple
+      collapsed: false
+      input:
+        awake_only:
+          name: Target Awake TVs Only
+          description: Only open PiP/notify on TVs whose telemetry sensor reports display_on = true.
+          default: true
+          selector:
+            boolean: {}
+        tv_fleet:
+          name: QuickBars TV Fleet Registry
+          description: List of {name, sensor, app_id, online_sensor, adb_media_player, restart_script} entries.
+          default:
+            - name: Living Room Shield
+              sensor: sensor.quickbars_living_room_shield
+              online_sensor: binary_sensor.quickbars_living_room_shield_online
+              app_id: PAWN0F35
+              adb_media_player: media_player.living_room_shield_adb
+              restart_script: script.restart_quickbars_living_room
+            - name: Dining Room Shield
+              sensor: sensor.quickbars_dining_room_shield
+              online_sensor: binary_sensor.quickbars_dining_room_shield_online
+              app_id: 3NNZ59AM
+              adb_media_player: media_player.dining_room_shield_adb
+              restart_script: script.restart_quickbars_dining_room
+            - name: Conners Shield
+              sensor: sensor.quickbars_conners_shield
+              online_sensor: binary_sensor.quickbars_conners_shield_online
+              app_id: C4C9M9WK
+              adb_media_player: media_player.conners_shield_adb
+              restart_script: script.restart_quickbars_conners_room
+          selector:
+            object: {}
+        excluded_app_ids:
+          name: Excluded App IDs
+          description: Optional list of QuickBars App IDs to skip for camera pop-ups.
+          default: []
+          selector:
+            object: {}
+
+    # ── 4. PiP Visual Styling & HUD (QuickBars v1.6) ───────────────────────────
+    pip_appearance:
+      name: "4. PiP Visual Styling & HUD (v1.6)"
+      icon: mdi:palette-outline
+      collapsed: true
+      input:
+        pip_size:
+          name: Motion PiP Size
+          default: medium
+          selector:
+            select:
+              options:
+                - small
+                - medium
+                - large
+                - fullscreen
+        doorbell_pip_size:
+          name: Doorbell Chime PiP Size
+          default: large
+          selector:
+            select:
+              options:
+                - medium
+                - large
+                - fullscreen
+        aspect_ratio:
+          name: Aspect Ratio
+          default: auto
+          selector:
+            select:
+              options:
+                - auto
+                - "16:9"
+                - "4:3"
+                - "1:1"
+        border_color:
+          name: Motion Accent Border Hex
+          description: "#RRGGBB border color for motion events (blank = no border)."
+          default: "#38BDF8"
+          selector:
+            text: {}
+        doorbell_border_color:
+          name: Doorbell / Visitor Border Hex
+          description: "#RRGGBB border color for doorbell chimes & visitor alerts."
+          default: "#EF4444"
+          selector:
+            text: {}
+        border_width_dp:
+          name: Border Thickness (dp)
+          default: 2
+          selector:
+            number:
+              min: 0
+              max: 8
+              unit_of_measurement: dp
+        corner_radius_dp:
+          name: Corner Radius (dp)
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 24
+              unit_of_measurement: dp
+        pip_opacity:
+          name: Window Opacity
+          default: 0.95
+          selector:
+            number:
+              min: 0.3
+              max: 1.0
+              step: 0.05
+        margin_dp:
+          name: Screen Edge Margin (dp)
+          default: 20
+          selector:
+            number:
+              min: 0
+              max: 64
+              unit_of_measurement: dp
+        show_title:
+          name: Show Camera Title Badge
+          default: true
+          selector:
+            boolean: {}
+        show_live_badge:
+          name: Show Green LIVE Indicator
+          default: true
+          selector:
+            boolean: {}
+        show_timestamp:
+          name: Show Live Clock (HH:mm:ss)
+          default: false
+          selector:
+            boolean: {}
+        show_countdown_bar:
+          name: Show Animated Auto-Hide Bar
+          default: true
+          selector:
+            boolean: {}
+        show_toast:
+          name: Show Open/Close Toast
+          default: false
+          selector:
+            boolean: {}
+
+    # ── 5. Stream, Audio & Lifecycle Tuning ────────────────────────────────────
+    stream_lifecycle:
+      name: "5. Stream, Audio & Lifecycle"
+      icon: mdi:video-wireless
+      collapsed: true
+      input:
+        auto_hide_seconds:
+          name: Motion Auto-Hide (Seconds)
+          default: 20
+          selector:
+            number:
+              min: 5
+              max: 120
+              unit_of_measurement: s
+        doorbell_auto_hide_seconds:
+          name: Doorbell Chime Auto-Hide (Seconds)
+          default: 30
+          selector:
+            number:
+              min: 5
+              max: 180
+              unit_of_measurement: s
+        on_retrigger:
+          name: On Retrigger Behavior
+          default: extend
+          selector:
+            select:
+              options:
+                - extend
+                - restart
+                - ignore
+                - toggle
+        rtsp_transport:
+          name: RTSP Transport Protocol
+          default: tcp
+          selector:
+            select:
+              options:
+                - tcp
+                - udp
+                - auto
+        rtsp_latency:
+          name: RTSP Latency Buffer Profile
+          default: low
+          selector:
+            select:
+              options:
+                - low
+                - balanced
+                - high
+        mute_audio:
+          name: Mute Motion Camera Audio
+          default: true
+          selector:
+            boolean: {}
+        doorbell_unmute_audio:
+          name: Unmute Doorbell Chimes
+          default: false
+          selector:
+            boolean: {}
+        software_decoder:
+          name: Prefer Software Decoder
+          default: false
+          selector:
+            boolean: {}
+        auto_close_on_sleep:
+          name: Auto-Close When TV Sleeps
+          default: true
+          selector:
+            boolean: {}
+        motion_priority:
+          name: Motion Alert Priority
+          default: normal
+          selector:
+            select:
+              options:
+                - normal
+                - high
+                - critical
+        doorbell_priority:
+          name: Doorbell Chime Priority
+          default: critical
+          selector:
+            select:
+              options:
+                - critical
+                - high
+
+    # ── 6. Actionable Snapshot Cards & Spoken TTS Alerts ───────────────────────
+    notifications_and_voice:
+      name: "6. Actionable Snapshots & Spoken TV Alerts"
+      icon: mdi:bell-ring
+      collapsed: true
+      input:
+        enable_snapshot_notify:
+          name: Send Actionable Snapshot Card
+          description: Sends quickbars.notify with camera snapshot + action buttons on matching triggers.
+          default: false
+          selector:
+            boolean: {}
+        notify_trigger_filter:
+          name: Snapshot Card Trigger Filter (Optional)
+          description: Entity IDs that send actionable snapshot cards (empty = all person/doorbell triggers).
+          default: []
+          selector:
+            object: {}
+        notify_duration:
+          name: Notification Card Duration (Seconds)
+          default: 10
+          selector:
+            number:
+              min: 3
+              max: 60
+              unit_of_measurement: s
+        notify_position:
+          name: Notification Card Position
+          default: top_right
+          selector:
+            select:
+              options:
+                - top_right
+                - top_left
+                - bottom_right
+                - bottom_left
+        notify_color:
+          name: Notification Card Accent Color
+          default: "#1E293B"
+          selector:
+            text: {}
+        notify_action_1_label:
+          name: Primary Button Label ("Show Live")
+          default: "Show Live"
+          selector:
+            text: {}
+        notify_action_2_label:
+          name: Secondary Button Label
+          default: "Dismiss"
+          selector:
+            text: {}
+        notify_action_2_actions:
+          name: Secondary Button Custom Actions (Optional)
+          description: Optional actions run when Secondary Button is clicked (e.g. turn on porch light).
+          default: []
+          selector:
+            action: {}
+        doorbell_speak_text:
+          name: Doorbell Spoken Announcement (TV TTS)
+          description: Optional phrase spoken via Android TV TTS when a doorbell chime or visitor rings.
+          default: ""
+          selector:
+            text: {}
+
+    # ── 7. Fleet Sync, Cinema DND, Watchdog & Post-Playback Rebind ─────────────
+    fleet_management:
+      name: "7. Fleet Sync, Cinema DND & Watchdog"
+      icon: mdi:shield-refresh
+      collapsed: true
+      input:
+        enable_helper_sync:
+          name: Auto-Sync Helper Changes to Fleet
+          default: false
+          selector:
+            boolean: {}
+        helper_sync_entities:
+          name: Helper Entities to Watch for Sync
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: input_boolean
+        cinema_dnd_helper:
+          name: Cinema DND Helper
+          default: input_boolean.quickbars_cinema_dnd
+          selector:
+            entity:
+              domain: input_boolean
+        quiet_hours_helper:
+          name: Bedroom Quiet Hours Helper
+          default: input_boolean.quickbars_quiet_hours_bedrooms
+          selector:
+            entity:
+              domain: input_boolean
+        auto_dock_helper:
+          name: Auto-Dock Helper
+          default: input_boolean.quickbars_auto_dock
+          selector:
+            entity:
+              domain: input_boolean
+        quiet_hours_target_ids:
+          name: Quiet Hours Target App IDs
+          default:
+            - C4C9M9WK
+          selector:
+            object: {}
+        quiet_hours_start:
+          name: Quiet Hours Start Hour (24h)
+          default: 22
+          selector:
+            number:
+              min: 0
+              max: 23
+        quiet_hours_end:
+          name: Quiet Hours End Hour (24h)
+          default: 7
+          selector:
+            number:
+              min: 0
+              max: 23
+        enable_auto_cinema_dnd:
+          name: Enable Auto Cinema DND During Playback
+          default: false
+          selector:
+            boolean: {}
+        cinema_media_players:
+          name: Cinema DND Media Players
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: media_player
+        cinema_apps:
+          name: Fullscreen Cinema Package IDs
+          default:
+            - com.plexapp.android
+            - com.netflix.ninja
+            - com.disney.disneyplus
+            - com.amazon.amazonvideo.livingroom
+          selector:
+            object: {}
+        cinema_start_delay_minutes:
+          name: Playback Duration Before Cinema DND (Minutes)
+          default: 2
+          selector:
+            number:
+              min: 0
+              max: 30
+              unit_of_measurement: min
+        cinema_stop_delay_seconds:
+          name: Stop Delay Before Clearing Cinema DND (Seconds)
+          default: 30
+          selector:
+            number:
+              min: 0
+              max: 300
+              unit_of_measurement: s
+        enable_offline_watchdog:
+          name: Enable Shield Offline Auto-Restart Watchdog
+          default: false
+          selector:
+            boolean: {}
+        watchdog_online_sensors:
+          name: Shield Online Binary Sensors
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: binary_sensor
+        watchdog_offline_minutes:
+          name: Offline Minutes Before ADB Restart
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 30
+              unit_of_measurement: min
+        watchdog_send_mobile_notify:
+          name: Send HA Notify on Watchdog Restart
+          default: true
+          selector:
+            boolean: {}
+        enable_post_playback_rebind:
+          name: Enable Post-Playback A11y Service Rebind (Shield Tube)
+          default: false
+          selector:
+            boolean: {}
+        rebind_media_players:
+          name: Media Players to Monitor for A11y Rebind
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain: media_player
+        rebind_delay_seconds:
+          name: Idle Delay After Playback Stops (Seconds)
+          default: 15
+          selector:
+            number:
+              min: 5
+              max: 120
+              unit_of_measurement: s
+        rebind_telemetry_sensor:
+          name: Shield Telemetry Sensor for A11y Check
+          default: sensor.quickbars_dining_room_shield
+          selector:
+            entity:
+              domain: sensor
+        rebind_adb_player:
+          name: Shield ADB Media Player for A11y Rebind
+          default: media_player.dining_room_shield_adb
+          selector:
+            entity:
+              domain: media_player
+        rebind_script:
+          name: Restart Script for A11y Rebind
+          default: script.restart_quickbars_dining_room
+          selector:
+            entity:
+              domain: script
+
+mode: parallel
+max: 10
+
+triggers:
+  - trigger: state
+    entity_id: !input person_binary_sensors
+    to: "on"
+    id: binary_motion
+  - trigger: state
+    entity_id: !input camera_event_entities
+    id: event_motion
+  - trigger: state
+    entity_id: !input helper_sync_entities
+    id: helper_sync
+  - trigger: state
+    entity_id: !input cinema_media_players
+    to: "playing"
+    for:
+      minutes: !input cinema_start_delay_minutes
+    id: cinema_start
+  - trigger: state
+    entity_id: !input cinema_media_players
+    from: "playing"
+    to:
+      - idle
+      - paused
+      - "off"
+      - standby
+    for:
+      seconds: !input cinema_stop_delay_seconds
+    id: cinema_stop
+  - trigger: state
+    entity_id: !input watchdog_online_sensors
+    to: "off"
+    for:
+      minutes: !input watchdog_offline_minutes
+    id: watchdog_offline
+  - trigger: state
+    entity_id: !input rebind_media_players
+    from: "playing"
+    to:
+      - idle
+      - "off"
+    for:
+      seconds: !input rebind_delay_seconds
+    id: post_playback_rebind
+
+conditions: []
+
+actions:
+  - variables:
+      master_helper: !input master_enable_helper
+      cooldown_sec: !input per_camera_cooldown_seconds
+      presence_ent: !input optional_home_presence_entity
+      go2rtc_host: !input go2rtc_rtsp_host
+      cam_map: !input trigger_camera_map
+      fallback_cam: !input fallback_camera_entity
+      use_snapshot_first: !input enable_snapshot_first
+      awake_only_flag: !input awake_only
+      fleet: !input tv_fleet
+      excluded_ids: !input excluded_app_ids
+      motion_size: !input pip_size
+      chime_size: !input doorbell_pip_size
+      motion_border: !input border_color
+      chime_border: !input doorbell_border_color
+      border_w: !input border_width_dp
+      corner_r: !input corner_radius_dp
+      win_opacity: !input pip_opacity
+      edge_margin: !input margin_dp
+      show_live_flag: !input show_live_badge
+      show_ts_flag: !input show_timestamp
+      show_bar_flag: !input show_countdown_bar
+      show_toast_flag: !input show_toast
+      motion_hide: !input auto_hide_seconds
+      chime_hide: !input doorbell_auto_hide_seconds
+      mute_motion: !input mute_audio
+      chime_unmute: !input doorbell_unmute_audio
+      motion_prio: !input motion_priority
+      chime_prio: !input doorbell_priority
+      enable_notify: !input enable_snapshot_notify
+      notify_filter: !input notify_trigger_filter
+      notify_dur: !input notify_duration
+      notify_pos: !input notify_position
+      notify_bg: !input notify_color
+      act1_lbl: !input notify_action_1_label
+      act2_lbl: !input notify_action_2_label
+      speak_txt: !input doorbell_speak_text
+      helper_sync_on: !input enable_helper_sync
+      dnd_helper: !input cinema_dnd_helper
+      qh_helper: !input quiet_hours_helper
+      dock_helper: !input auto_dock_helper
+      qh_targets: !input quiet_hours_target_ids
+      qh_start: !input quiet_hours_start
+      qh_end: !input quiet_hours_end
+      cinema_dnd_on: !input enable_auto_cinema_dnd
+      cinema_app_list: !input cinema_apps
+      watchdog_on: !input enable_offline_watchdog
+      watchdog_notify: !input watchdog_send_mobile_notify
+      rebind_on: !input enable_post_playback_rebind
+      rebind_sensor: !input rebind_telemetry_sensor
+      rebind_adb: !input rebind_adb_player
+      rebind_scr: !input rebind_script
+
+  - choose:
+      # ── Branch A: Motion / Person / Doorbell Camera Pop-up + Snapshot Card ──
+      - conditions:
+          - condition: trigger
+            id:
+              - binary_motion
+              - event_motion
+          - condition: template
+            value_template: "{{ is_state(master_helper, 'on') }}"
+          - condition: template
+            value_template: >
+              {{ (presence_ent | string | trim | length == 0)
+                 or (states(presence_ent | string | trim) in ['home', 'on']) }}
+          - condition: template
+            value_template: >
+              {% if trigger.id == 'binary_motion' %}
+                {{ cooldown_sec | int == 0
+                   or trigger.from_state is none
+                   or (as_timestamp(now()) - as_timestamp(trigger.from_state.last_changed, 0)) >= (cooldown_sec | int) }}
+              {% else %}
+                {{ (trigger.to_state is defined
+                    and trigger.to_state.attributes.event_type is defined
+                    and trigger.to_state.attributes.event_type in ['camera_person', 'doorbell_chime'])
+                   or ('chime' in trigger.entity_id) }}
+              {% endif %}
+        sequence:
+          - variables:
+              trig_ent: "{{ trigger.entity_id }}"
+              entry: "{{ cam_map.get(trig_ent, {}) }}"
+              selected_cam: "{{ entry.get('camera', fallback_cam) }}"
+              selected_rtsp: "{{ entry.get('rtsp', '') }}"
+              selected_title: "{{ entry.get('title', state_attr(trig_ent, 'friendly_name') | default('Camera')) }}"
+              base_corner: "{{ entry.get('default_corner', 'top_right') }}"
+              is_chime: "{{ ('chime' in trig_ent) or ('visitor' in trig_ent) }}"
+              resolved_corner: >
+                {%- set ns = namespace(occupied=[], chosen=base_corner) -%}
+                {%- for entity, info in cam_map.items() if entity != trig_ent -%}
+                  {%- set s = states[entity] -%}
+                  {%- if s and (s.state == 'on' or entity.startswith('event.')) and (as_timestamp(now()) - as_timestamp(s.last_changed) < 20) -%}
+                    {%- set ns.occupied = ns.occupied + [info.get('default_corner', 'top_right')] -%}
+                  {%- endif -%}
+                {%- endfor -%}
+                {%- if base_corner in ns.occupied -%}
+                  {%- for c in ['top_right', 'top_left', 'bottom_right', 'bottom_left'] if c not in ns.occupied and ns.chosen == base_corner -%}
+                    {%- set ns.chosen = c -%}
+                  {%- endfor -%}
+                {%- endif -%}
+                {{- ns.chosen | trim -}}
+              target_app_ids: >
+                {% set ns = namespace(ids=[]) %}
+                {% set excl = excluded_ids if excluded_ids is iterable else [] %}
+                {% for item in fleet %}
+                  {% if item.app_id not in excl and (not awake_only_flag or state_attr(item.sensor, 'display_on') == true) %}
+                    {% set ns.ids = ns.ids + [item.app_id] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.ids }}
+              eff_size: "{{ chime_size if is_chime else motion_size }}"
+              eff_border: "{{ chime_border if is_chime else motion_border }}"
+              eff_auto_hide: "{{ chime_hide if is_chime else motion_hide }}"
+              eff_mute: "{{ (not chime_unmute) if is_chime else mute_motion }}"
+              eff_prio: "{{ chime_prio if is_chime else motion_prio }}"
+              eff_snap: "{{ selected_cam if (use_snapshot_first and (selected_cam | length > 0)) else '' }}"
+              eff_speak: "{{ speak_txt if (is_chime and (speak_txt | string | trim | length > 0)) else '' }}"
+
+          - condition: template
+            value_template: "{{ target_app_ids | length > 0 }}"
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ selected_rtsp | length > 0 }}"
+                sequence:
+                  - event: quickbars.open
+                    event_data:
+                      target_ids: "{{ target_app_ids }}"
+                      rtsp_url: "rtsp://{{ go2rtc_host }}/{{ selected_rtsp }}"
+                      snapshot_entity: "{{ eff_snap }}"
+                      position: "{{ resolved_corner }}"
+                      size: "{{ eff_size }}"
+                      aspect_ratio: !input aspect_ratio
+                      auto_hide: "{{ eff_auto_hide | int }}"
+                      show_title: !input show_title
+                      camera_title: "{{ selected_title }}"
+                      show_live_badge: "{{ show_live_flag }}"
+                      show_timestamp: "{{ show_ts_flag }}"
+                      show_countdown_bar: "{{ show_bar_flag }}"
+                      border_color: "{{ eff_border }}"
+                      border_width_dp: "{{ border_w | int }}"
+                      corner_radius_dp: "{{ corner_r | int }}"
+                      opacity: "{{ win_opacity | float }}"
+                      margin_dp: "{{ edge_margin | int }}"
+                      show_toast: "{{ show_toast_flag }}"
+                      mute_audio: "{{ eff_mute }}"
+                      rtsp_transport: !input rtsp_transport
+                      rtsp_latency: !input rtsp_latency
+                      software_decoder: !input software_decoder
+                      on_retrigger: !input on_retrigger
+                      auto_close_on_sleep: !input auto_close_on_sleep
+                      priority: "{{ eff_prio }}"
+                      speak_text: "{{ eff_speak }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ selected_cam | length > 0 }}"
+                sequence:
+                  - event: quickbars.open
+                    event_data:
+                      target_ids: "{{ target_app_ids }}"
+                      camera_entity: "{{ selected_cam }}"
+                      position: "{{ resolved_corner }}"
+                      size: "{{ eff_size }}"
+                      aspect_ratio: !input aspect_ratio
+                      auto_hide: "{{ eff_auto_hide | int }}"
+                      show_title: !input show_title
+                      camera_title: "{{ selected_title }}"
+                      show_live_badge: "{{ show_live_flag }}"
+                      show_timestamp: "{{ show_ts_flag }}"
+                      show_countdown_bar: "{{ show_bar_flag }}"
+                      border_color: "{{ eff_border }}"
+                      border_width_dp: "{{ border_w | int }}"
+                      corner_radius_dp: "{{ corner_r | int }}"
+                      opacity: "{{ win_opacity | float }}"
+                      margin_dp: "{{ edge_margin | int }}"
+                      show_toast: "{{ show_toast_flag }}"
+                      mute_audio: "{{ eff_mute }}"
+                      on_retrigger: !input on_retrigger
+                      auto_close_on_sleep: !input auto_close_on_sleep
+                      priority: "{{ eff_prio }}"
+                      speak_text: "{{ eff_speak }}"
+
+          - if:
+              - condition: template
+                value_template: >
+                  {{ enable_notify
+                     and (selected_cam | length > 0)
+                     and ((notify_filter | length == 0) or (trig_ent in notify_filter)) }}
+            then:
+              - variables:
+                  notif_cid: "qb_{{ trig_ent.split('.')[-1] }}_{{ now().timestamp() | int }}"
+              - event: quickbars.notify
+                event_data:
+                  target_ids: "{{ target_app_ids }}"
+                  title: "{{ selected_title }}"
+                  message: "Activity detected"
+                  image_url: "/api/camera_proxy/{{ selected_cam }}"
+                  mdi_icon: "{{ 'mdi:doorbell-video' if is_chime else 'mdi:cctv' }}"
+                  color: "{{ notify_bg }}"
+                  duration: "{{ notify_dur | int }}"
+                  position: "{{ notify_pos }}"
+                  priority: "high"
+                  cid: "{{ notif_cid }}"
+                  actions:
+                    - id: show_live
+                      label: "{{ act1_lbl }}"
+                    - id: action_2
+                      label: "{{ act2_lbl }}"
+              - wait_for_trigger:
+                  - trigger: event
+                    event_type: quickbars.action
+                    event_data:
+                      cid: "{{ notif_cid }}"
+                timeout:
+                  seconds: 15
+                continue_on_timeout: false
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ wait.trigger.event.data.action_id == 'show_live' and (selected_rtsp | length > 0) }}"
+                    sequence:
+                      - event: quickbars.open
+                        event_data:
+                          target_ids: "{{ target_app_ids }}"
+                          rtsp_url: "rtsp://{{ go2rtc_host }}/{{ selected_rtsp }}"
+                          snapshot_entity: "{{ eff_snap }}"
+                          camera_title: "{{ selected_title }} Live"
+                          position: "{{ resolved_corner }}"
+                          size: large
+                          border_color: "{{ eff_border }}"
+                          border_width_dp: "{{ border_w | int }}"
+                          corner_radius_dp: "{{ corner_r | int }}"
+                          show_live_badge: "{{ show_live_flag }}"
+                          show_countdown_bar: "{{ show_bar_flag }}"
+                          auto_hide: 30
+                          mute_audio: "{{ eff_mute }}"
+                          rtsp_transport: !input rtsp_transport
+                          rtsp_latency: !input rtsp_latency
+                          on_retrigger: extend
+                          auto_close_on_sleep: !input auto_close_on_sleep
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ wait.trigger.event.data.action_id == 'show_live' and (selected_cam | length > 0) }}"
+                    sequence:
+                      - event: quickbars.open
+                        event_data:
+                          target_ids: "{{ target_app_ids }}"
+                          camera_entity: "{{ selected_cam }}"
+                          camera_title: "{{ selected_title }} Live"
+                          position: "{{ resolved_corner }}"
+                          size: large
+                          border_color: "{{ eff_border }}"
+                          border_width_dp: "{{ border_w | int }}"
+                          corner_radius_dp: "{{ corner_r | int }}"
+                          show_live_badge: "{{ show_live_flag }}"
+                          show_countdown_bar: "{{ show_bar_flag }}"
+                          auto_hide: 30
+                          mute_audio: "{{ eff_mute }}"
+                          on_retrigger: extend
+                          auto_close_on_sleep: !input auto_close_on_sleep
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ wait.trigger.event.data.action_id == 'action_2' }}"
+                    sequence: !input notify_action_2_actions
+
+      # ── Branch B: Sync HA Helpers to QuickBars TV Fleet Over WebSocket ──────
+      - conditions:
+          - condition: trigger
+            id: helper_sync
+          - condition: template
+            value_template: "{{ helper_sync_on }}"
+        sequence:
+          - event: quickbars.config
+            event_data:
+              dnd: "{{ is_state(dnd_helper, 'on') }}"
+              auto_dock: "{{ is_state(dock_helper, 'on') }}"
+          - event: quickbars.config
+            event_data:
+              target_ids: "{{ qh_targets }}"
+              quiet_hours_enabled: "{{ is_state(qh_helper, 'on') }}"
+              quiet_hours_start: "{{ qh_start | int }}"
+              quiet_hours_end: "{{ qh_end | int }}"
+          - event: quickbars.ping
+            event_data: {}
+
+      # ── Branch C: Automatic Cinema DND On Fullscreen Playback ───────────────
+      - conditions:
+          - condition: trigger
+            id: cinema_start
+          - condition: template
+            value_template: >
+              {{ cinema_dnd_on
+                 and (state_attr(trigger.entity_id, 'app_id') in cinema_app_list) }}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: !input cinema_dnd_helper
+
+      - conditions:
+          - condition: trigger
+            id: cinema_stop
+          - condition: template
+            value_template: "{{ cinema_dnd_on }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input cinema_dnd_helper
+
+      # ── Branch D: Shield Offline Watchdog Auto-Restart ──────────────────────
+      - conditions:
+          - condition: trigger
+            id: watchdog_offline
+          - condition: template
+            value_template: "{{ watchdog_on }}"
+        sequence:
+          - variables:
+              matched_tv: >
+                {% set ns = namespace(found={}) %}
+                {% for item in fleet %}
+                  {% if item.get('online_sensor') == trigger.entity_id %}
+                    {% set ns.found = item %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.found }}
+          - condition: template
+            value_template: >
+              {{ (matched_tv | length > 0)
+                 and not is_state(matched_tv.get('adb_media_player', ''), 'off')
+                 and (matched_tv.get('restart_script', '') | length > 0) }}
+          - action: script.turn_on
+            target:
+              entity_id: "{{ matched_tv.restart_script }}"
+          - if:
+              - condition: template
+                value_template: "{{ watchdog_notify }}"
+            then:
+              - action: notify.notify
+                data:
+                  title: "QuickBars Watchdog"
+                  message: "QuickBars was offline on {{ matched_tv.get('name', trigger.entity_id) }} and has been automatically restarted."
+
+      # ── Branch E: Post-Playback AccessibilityService Rebind (Shield Tube) ───
+      - conditions:
+          - condition: trigger
+            id: post_playback_rebind
+          - condition: template
+            value_template: >
+              {{ rebind_on
+                 and is_state_attr(rebind_sensor, 'a11y_bound', false)
+                 and not is_state(rebind_adb, 'off') }}
+        sequence:
+          - action: script.turn_on
+            target:
+              entity_id: !input rebind_script

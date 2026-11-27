@@ -23,6 +23,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
 import dev.trooped.tvquickbars.QuickBarsApp
 import dev.trooped.tvquickbars.R
 import dev.trooped.tvquickbars.background.BackgroundHaConnectionManager
@@ -32,6 +34,7 @@ import dev.trooped.tvquickbars.persistence.SavedEntitiesManager
 import dev.trooped.tvquickbars.persistence.SecurePrefsManager
 import dev.trooped.tvquickbars.data.EntityItem
 import dev.trooped.tvquickbars.services.ComposeViewLifecycleOwner
+import dev.trooped.tvquickbars.utils.QuickBarsTtsHelper
 import kotlin.math.roundToInt
 
 /**
@@ -56,7 +59,8 @@ class CameraPipController(
         val view: ComposeView,
         val lifecycleOwner: ComposeViewLifecycleOwner,
         val hideHandler: Handler,
-        val hideRunnable: Runnable
+        val hideRunnable: Runnable,
+        val countdownResetMs: MutableState<Long> = mutableStateOf(System.currentTimeMillis())
     )
 
     // Registry of all currently active overlays keyed by slotKey (e.g. "TOP_LEFT", "TOP_RIGHT")
@@ -122,6 +126,11 @@ class CameraPipController(
                 req
             }
 
+            // ── Optional Spoken Alert via Android TV TTS ────────────────────────
+            if (!effectiveReq.speakText.isNullOrBlank()) {
+                QuickBarsTtsHelper.speak(context, effectiveReq.speakText.trim())
+            }
+
             // ── Multi-Camera Group Request (Grid / Split Dock) ──────────────────
             if (effectiveReq.cameras != null && effectiveReq.cameras.isNotEmpty()) {
                 handleGroupRequest(effectiveReq)
@@ -171,7 +180,7 @@ class CameraPipController(
         val autoHide = req.autoHideSec ?: 45
         val title = req.customTitle?.takeIf { !it.isNullish() }?.trim() ?: "Cameras (${subSpecs.size})"
 
-        val groupSpec = CameraPipSpec(
+        val baseGroupSpec = CameraPipSpec(
             url = subSpecs.first().url,
             authToken = subSpecs.first().authToken,
             entityId = "group:" + subSpecs.joinToString("+") { it.entityId },
@@ -188,6 +197,7 @@ class CameraPipController(
             groupLayout = layout,
             autoCloseOnSleep = req.autoCloseOnSleep ?: true
         )
+        val groupSpec = applyVisualOptions(baseGroupSpec, req)
 
         if (showToastOnToggle && !activeOverlays.containsKey(slotKey)) {
             showToast("$title → PIP")
@@ -244,11 +254,14 @@ class CameraPipController(
             baseSpec.rtspProfile.muteAudio
         }
 
-        val finalSpec = baseSpec.copy(
-            cornerPosition = corner,
-            slotKey = targetSlot,
-            rtspProfile = baseSpec.rtspProfile.copy(muteAudio = shouldMute),
-            autoCloseOnSleep = req.autoCloseOnSleep ?: baseSpec.autoCloseOnSleep
+        val finalSpec = applyVisualOptions(
+            baseSpec.copy(
+                cornerPosition = corner,
+                slotKey = targetSlot,
+                rtspProfile = baseSpec.rtspProfile.copy(muteAudio = shouldMute),
+                autoCloseOnSleep = req.autoCloseOnSleep ?: baseSpec.autoCloseOnSleep
+            ),
+            req
         )
 
         val defaultRetrigger = if (req.action == null || req.action.equals("open", true)) "extend" else "toggle"
@@ -286,6 +299,7 @@ class CameraPipController(
                     "ignore" -> return@runOnMain
                     "extend" -> {
                         existing.hideHandler.removeCallbacks(existing.hideRunnable)
+                        existing.countdownResetMs.value = System.currentTimeMillis()
                         val newTimeout = spec.autoHideTimeout
                         if (newTimeout > 0) {
                             existing.hideHandler.postDelayed(existing.hideRunnable, newTimeout * 1000L)
@@ -318,6 +332,7 @@ class CameraPipController(
 
         val hideHandler = Handler(Looper.getMainLooper())
         val hideRunnable = Runnable { hide(slotKey) }
+        val countdownResetMs = mutableStateOf(System.currentTimeMillis())
 
         // Fresh Compose View
         val themed = ContextThemeWrapper(context, R.style.Theme_HAQuickBars)
@@ -331,15 +346,23 @@ class CameraPipController(
                     lifecycleOwner.attachToView(this@apply)
                     setContent {
                         MaterialTheme {
-                            val align = when (spec.cornerPosition) {
-                                "TOP_RIGHT" -> Alignment.TopEnd
-                                "BOTTOM_LEFT" -> Alignment.BottomStart
-                                "BOTTOM_RIGHT" -> Alignment.BottomEnd
-                                else -> Alignment.TopStart
+                            val align = if (spec.isFullscreen) {
+                                Alignment.Center
+                            } else {
+                                when (spec.cornerPosition) {
+                                    "TOP_RIGHT" -> Alignment.TopEnd
+                                    "BOTTOM_LEFT" -> Alignment.BottomStart
+                                    "BOTTOM_RIGHT" -> Alignment.BottomEnd
+                                    else -> Alignment.TopStart
+                                }
                             }
                             Box(Modifier.wrapContentSize(), contentAlignment = align) {
                                 Box(Modifier.padding(12.dp)) {
-                                    CameraPipOverlay(spec = spec, onClose = { hide(slotKey) })
+                                    CameraPipOverlay(
+                                        spec = spec,
+                                        countdownResetKey = countdownResetMs.value,
+                                        onClose = { hide(slotKey) }
+                                    )
                                 }
                             }
                         }
@@ -361,6 +384,7 @@ class CameraPipController(
         val screenH = context.resources.displayMetrics.heightPixels
         val finalW = wPx.coerceAtMost((screenW * 0.95f).toInt())
         val finalH = hPx.coerceAtMost((screenH * 0.95f).toInt())
+        val marginPx = if (spec.isFullscreen) 0 else (spec.marginDp.coerceIn(0, 64) * density).roundToInt()
 
         val params = WindowManager.LayoutParams(
             finalW,
@@ -373,13 +397,19 @@ class CameraPipController(
             PixelFormat.TRANSLUCENT
         ).apply {
             windowAnimations = 0
-            gravity = when (spec.cornerPosition) {
-                "TOP_RIGHT"    -> Gravity.TOP or Gravity.END
-                "BOTTOM_LEFT"  -> Gravity.BOTTOM or Gravity.START
-                "BOTTOM_RIGHT" -> Gravity.BOTTOM or Gravity.END
-                else           -> Gravity.TOP or Gravity.START
+            gravity = if (spec.isFullscreen) {
+                Gravity.CENTER
+            } else {
+                when (spec.cornerPosition) {
+                    "TOP_RIGHT"    -> Gravity.TOP or Gravity.END
+                    "BOTTOM_LEFT"  -> Gravity.BOTTOM or Gravity.START
+                    "BOTTOM_RIGHT" -> Gravity.BOTTOM or Gravity.END
+                    else           -> Gravity.TOP or Gravity.START
+                }
             }
-            x = 24; y = 24; alpha = 1f
+            x = marginPx
+            y = marginPx
+            alpha = spec.opacity.coerceIn(0.25f, 1.0f)
         }
 
         try {
@@ -390,7 +420,8 @@ class CameraPipController(
                 view = view,
                 lifecycleOwner = lifecycleOwner,
                 hideHandler = hideHandler,
-                hideRunnable = hideRunnable
+                hideRunnable = hideRunnable,
+                countdownResetMs = countdownResetMs
             )
             syncActiveTelemetry()
         } catch (e: Exception) {
@@ -548,23 +579,66 @@ class CameraPipController(
             muteAudio = req.muteAudio ?: false
         )
 
-        val snapshot = deriveGo2RtcSnapshotUrl(sanitized)
+        val snapshotEntityId = req.snapshotEntity?.takeIf { it.startsWith("camera.", ignoreCase = true) }
+            ?: req.cameraEntity?.takeIf { it.startsWith("camera.", ignoreCase = true) }
+        val (snapshot, snapshotToken) = buildHaSnapshotUrlAndToken(snapshotEntityId)
 
-        return CameraPipSpec(
-            url = sanitized,
-            authToken = null,
-            entityId = entityId,
-            title = title,
-            widthDp = wDp,
-            heightDp = hDp,
-            marginDp = 20,
-            showTitle = showTitle,
-            cornerPosition = corner,
-            autoHideTimeout = autoHide,
-            rtspProfile = profile,
-            slotKey = req.slot ?: corner,
-            autoCloseOnSleep = req.autoCloseOnSleep ?: true,
-            snapshotUrl = snapshot
+        return applyVisualOptions(
+            CameraPipSpec(
+                url = sanitized,
+                authToken = snapshotToken,
+                entityId = entityId,
+                title = title,
+                widthDp = wDp,
+                heightDp = hDp,
+                marginDp = 20,
+                showTitle = showTitle,
+                cornerPosition = corner,
+                autoHideTimeout = autoHide,
+                rtspProfile = profile,
+                slotKey = req.slot ?: corner,
+                autoCloseOnSleep = req.autoCloseOnSleep ?: true,
+                snapshotUrl = snapshot
+            ),
+            req
+        )
+    }
+
+    private fun normalizedHaBaseUrl(): String? {
+        var baseUrl = SecurePrefsManager.getHAUrl(context)?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+            baseUrl = if (baseUrl.contains(":")) "http://$baseUrl" else "http://$baseUrl:8123"
+        }
+        return baseUrl.trimEnd('/')
+    }
+
+    private fun buildHaSnapshotUrlAndToken(entityId: String?): Pair<String?, String?> {
+        val eid = entityId?.trim()?.takeIf { it.startsWith("camera.", ignoreCase = true) } ?: return null to null
+        val base = normalizedHaBaseUrl() ?: return null to null
+        val token = SecurePrefsManager.getHAToken(context)
+        return "$base/api/camera_proxy/$eid" to token
+    }
+
+    private fun applyVisualOptions(base: CameraPipSpec, req: CameraRequest): CameraPipSpec {
+        val borderColor = req.borderColor?.trim()?.takeIf { it.isNotEmpty() } ?: base.borderColorHex
+        val resolvedBorderWidth = when {
+            req.borderWidthDp != null -> req.borderWidthDp.coerceIn(0, 8)
+            borderColor != null && base.borderWidthDp == 0 -> 2
+            else -> base.borderWidthDp.coerceIn(0, 8)
+        }
+        val fullscreen = req.size.equals("fullscreen", ignoreCase = true) ||
+            req.layout.equals("fullscreen", ignoreCase = true) ||
+            base.isFullscreen
+        return base.copy(
+            borderColorHex = borderColor,
+            borderWidthDp = resolvedBorderWidth,
+            cornerRadiusDp = (req.cornerRadiusDp ?: base.cornerRadiusDp).coerceIn(0, 24),
+            opacity = (req.opacity ?: base.opacity).coerceIn(0.25f, 1.0f),
+            marginDp = (req.marginDp ?: base.marginDp).coerceIn(0, 64),
+            showLiveBadge = req.showLiveBadge ?: base.showLiveBadge,
+            showTimestamp = req.showTimestamp ?: base.showTimestamp,
+            showCountdownBar = req.showCountdownBar ?: base.showCountdownBar,
+            isFullscreen = fullscreen
         )
     }
 
@@ -677,15 +751,13 @@ class CameraPipController(
         req: CameraRequest
     ): CameraPipSpec {
         val rtsp = req.rtspUrl?.takeIf { it.isNotBlank() }
+        val cleanBase = normalizedHaBaseUrl() ?: ""
+        val authToken = SecurePrefsManager.getHAToken(context)
+        val snapshotEntityId = req.snapshotEntity?.takeIf { it.startsWith("camera.", ignoreCase = true) } ?: entity.id
+        val (snapshotUrl, snapshotToken) = buildHaSnapshotUrlAndToken(snapshotEntityId)
         val (finalUrl, finalToken) = if (rtsp != null) {
-            rtsp to null
+            rtsp to snapshotToken
         } else {
-            var baseUrl = SecurePrefsManager.getHAUrl(context)
-            val authToken = SecurePrefsManager.getHAToken(context)
-            if (baseUrl != null && !baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
-                baseUrl = if (baseUrl.contains(":")) "http://$baseUrl" else "http://$baseUrl:8123"
-            }
-            val cleanBase = (baseUrl ?: "").trimEnd('/')
             "${cleanBase}/api/camera_proxy_stream/${entity.id}" to authToken
         }
 
@@ -732,33 +804,24 @@ class CameraPipController(
             muteAudio = req.muteAudio ?: false
         )
 
-        val snapshot = if (rtsp != null) {
-            deriveGo2RtcSnapshotUrl(rtsp)
-        } else {
-            val base = SecurePrefsManager.getHAUrl(context)?.trim()?.trimEnd('/')
-            if (!base.isNullOrBlank()) {
-                val normBase = if (!base.startsWith("http://") && !base.startsWith("https://")) {
-                    if (base.contains(":")) "http://$base" else "http://$base:8123"
-                } else base
-                "$normBase/api/camera_proxy/${entity.id}"
-            } else null
-        }
-
-        return CameraPipSpec(
-            url = finalUrl,
-            authToken = finalToken,
-            entityId = entity.id,
-            title = safeTitle,
-            widthDp = wDp,
-            heightDp = hDp,
-            marginDp = 20,
-            showTitle = showTitle,
-            cornerPosition = corner,
-            autoHideTimeout = autoHide,
-            rtspProfile = profile,
-            slotKey = req.slot ?: corner,
-            autoCloseOnSleep = req.autoCloseOnSleep ?: true,
-            snapshotUrl = snapshot
+        return applyVisualOptions(
+            CameraPipSpec(
+                url = finalUrl,
+                authToken = finalToken,
+                entityId = entity.id,
+                title = safeTitle,
+                widthDp = wDp,
+                heightDp = hDp,
+                marginDp = 20,
+                showTitle = showTitle,
+                cornerPosition = corner,
+                autoHideTimeout = autoHide,
+                rtspProfile = profile,
+                slotKey = req.slot ?: corner,
+                autoCloseOnSleep = req.autoCloseOnSleep ?: true,
+                snapshotUrl = snapshotUrl
+            ),
+            req
         )
     }
 
@@ -779,6 +842,14 @@ class CameraPipController(
         layout: String = "grid"
     ): Pair<Int, Int> {
         val density = context.resources.displayMetrics.density
+
+        if (req.size.equals("fullscreen", ignoreCase = true) || req.layout.equals("fullscreen", ignoreCase = true)) {
+            val screenW = context.resources.displayMetrics.widthPixels
+            val screenH = context.resources.displayMetrics.heightPixels
+            val wDp = ((screenW / density) * 0.90f).roundToInt().coerceIn(320, 3840)
+            val hDp = ((screenH / density) * 0.88f).roundToInt().coerceIn(180, 2160)
+            return wDp to hDp
+        }
 
         if (req.sizePxW != null && req.sizePxH != null) {
             val wDp = (req.sizePxW / density).roundToInt().coerceIn(120, 3840)

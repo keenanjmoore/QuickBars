@@ -127,7 +127,17 @@ class QuickBarsOpenHandler : dev.trooped.tvquickbars.ha.ws.WsHandler {
             onRetrigger = obj.optString("on_retrigger", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             aspectRatio = obj.optString("aspect_ratio", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
             autoCloseOnSleep = if (obj.has("auto_close_on_sleep") && !obj.isNull("auto_close_on_sleep")) obj.optBoolean("auto_close_on_sleep") else null,
-            priority = obj.optString("priority", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+            priority = obj.optString("priority", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            borderColor = obj.optString("border_color", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            borderWidthDp = if (obj.has("border_width_dp") && !obj.isNull("border_width_dp")) obj.optInt("border_width_dp") else null,
+            cornerRadiusDp = if (obj.has("corner_radius_dp") && !obj.isNull("corner_radius_dp")) obj.optInt("corner_radius_dp") else null,
+            opacity = if (obj.has("opacity") && !obj.isNull("opacity")) obj.optDouble("opacity").toFloat() else null,
+            marginDp = if (obj.has("margin_dp") && !obj.isNull("margin_dp")) obj.optInt("margin_dp") else null,
+            showLiveBadge = if (obj.has("show_live_badge") && !obj.isNull("show_live_badge")) obj.optBoolean("show_live_badge") else null,
+            showTimestamp = if (obj.has("show_timestamp") && !obj.isNull("show_timestamp")) obj.optBoolean("show_timestamp") else null,
+            showCountdownBar = if (obj.has("show_countdown_bar") && !obj.isNull("show_countdown_bar")) obj.optBoolean("show_countdown_bar") else null,
+            snapshotEntity = obj.optString("snapshot_entity", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) },
+            speakText = obj.optString("speak_text", null)?.takeIf { it.isNotBlank() && !it.equals("null", true) }
         )
     }
 }
